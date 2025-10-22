@@ -29,7 +29,7 @@ FROM scratch
 COPY --from=builder /app/server /server
 
 # Expose port
-EXPOSE 8780
+EXPOSE 8080
 
 # Run the app
 ENTRYPOINT ["/server"]

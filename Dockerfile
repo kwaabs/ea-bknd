@@ -1,15 +1,14 @@
 # -----------------------------
 # Stage 1: Build the Go binary
 # -----------------------------
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
 # Copy go.mod (required)
 COPY go.mod ./
 
-# Copy go.sum only if it exists (avoids build failure)
-# The wildcard * handles missing files gracefully
+# Copy go.sum if it exists
 COPY go.sum* ./
 
 # Download dependencies
@@ -26,11 +25,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o server ./cmd/server
 # -----------------------------
 FROM scratch
 
-# Copy compiled binary
+# Copy binary from builder
 COPY --from=builder /app/server /server
 
 # Expose port
-EXPOSE 8780
+EXPOSE 8080
 
-# Run binary
+# Run the app
 ENTRYPOINT ["/server"]

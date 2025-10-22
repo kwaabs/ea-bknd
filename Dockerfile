@@ -20,19 +20,27 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o server ./cmd/server
 # -----------------------------
 FROM alpine:3.20
 
+# Create a non-root user and switch to it for security
+RUN adduser -D -g '' appuser
+USER appuser
+
+# Add CA certs
+RUN apk --no-cache add ca-certificates
+
+# Set a non-root working directory
 WORKDIR /app
 
-# Copy the binary
+# Copy the binary from the builder stage
 COPY --from=builder /app/server .
 
-# (Optional) Add CA certs for HTTPS/database connections
-RUN apk --no-cache add ca-certificates
+# Copy the keys (if not sensitive)
+COPY --from=builder --chown=appuser:appuser /app/keys ./keys
 
 # Expose your correct port
 EXPOSE 8780
 
-# Set environment variable (Coolify respects this)
+# Set environment variable
 ENV PORT=8780
 
-# Run the app
-CMD ["./server"]
+# Use ENTRYPOINT to make the container behave as the executable
+ENTRYPOINT ["./server"]

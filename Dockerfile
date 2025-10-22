@@ -20,21 +20,26 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o server ./cmd/server
 # -----------------------------
 FROM alpine:3.20
 
-# Create a non-root user and switch to it for security
-RUN adduser -D -g '' appuser
-USER appuser
-
-# Add CA certs
+# Add CA certs FIRST (as root)
 RUN apk --no-cache add ca-certificates
 
-# Set a non-root working directory
+# Create a non-root user
+RUN adduser -D -g '' appuser
+
+# Set working directory
 WORKDIR /app
 
 # Copy the binary from the builder stage
 COPY --from=builder /app/server .
 
-# Copy the keys (if not sensitive)
-COPY --from=builder --chown=appuser:appuser /app/keys ./keys
+# Copy the keys
+COPY --from=builder /app/keys ./keys
+
+# Change ownership to appuser
+RUN chown -R appuser:appuser /app
+
+# NOW switch to non-root user
+USER appuser
 
 # Expose your correct port
 EXPOSE 8780

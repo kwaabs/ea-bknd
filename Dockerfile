@@ -5,31 +5,34 @@ FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
-# Copy go.mod (required)
-COPY go.mod ./
-
-# Copy go.sum if it exists
-COPY go.sum* ./
-
-# Download dependencies
+# Copy module files
+COPY go.mod go.sum* ./
 RUN go mod download
 
-# Copy the rest of your source code
+# Copy source
 COPY . .
 
-# Build the Go binary
+# Build static binary
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o server ./cmd/server
 
 # -----------------------------
-# Stage 2: Minimal runtime image
+# Stage 2: Runtime image
 # -----------------------------
-FROM scratch
+FROM alpine:3.20
 
-# Copy binary from builder
-COPY --from=builder /app/server /server
+WORKDIR /app
 
-# Expose port
+# Copy the binary
+COPY --from=builder /app/server .
+
+# (Optional) Add CA certs for HTTPS/database connections
+RUN apk --no-cache add ca-certificates
+
+# Expose your correct port
 EXPOSE 8780
 
+# Set environment variable (Coolify respects this)
+ENV PORT=8780
+
 # Run the app
-ENTRYPOINT ["/server"]
+CMD ["./server"]

@@ -46,8 +46,8 @@ func Load() *Config {
 	)
 
 	return &Config{
-		Port:              getEnv("APP_PORT", "8080"),
-		DatabaseURL:       getEnv("DATABASE_URL", "postgres://postgres:password@localhost:5432/mydb?sslmode=disable"),
+		Port:              getEnv("APP_PORT", "8780"),
+		DatabaseURL:       getEnv("DATABASE_URL", "postgres://postgres:password@localhost:5432/ea-5?sslmode=disable"),
 		Environment:       getEnv("ENVIRONMENT", "development"),
 		BunDebug:          getEnvAsBool("BUNDEBUG", false),
 		JWTPrivateKeyPath: getEnv("JWT_PRIVATE_KEY_PATH", "keys/jwt_private.pem"),

@@ -35,6 +35,9 @@ COPY --from=builder /app/server .
 # Copy the keys
 COPY --from=builder /app/keys ./keys
 
+# In Stage 2, after COPY keys
+COPY --from=builder /app/.env .
+
 # Change ownership to appuser
 RUN chown -R appuser:appuser /app
 

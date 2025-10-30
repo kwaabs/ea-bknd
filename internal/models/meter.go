@@ -139,6 +139,7 @@ type DailyConsumptionResults struct {
 	District              string    `bun:"district" json:"district,omitempty"`
 	Station               string    `bun:"station" json:"station,omitempty"`
 	FeederPanelName       string    `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
+	IC_OG                 string    `bun:"ic_og" json:"ic_og,omitempty"`
 	VoltageKv             string    `bun:"voltage_kv" json:"voltage_kv,omitempty"`
 	MeterType             string    `bun:"meter_type" json:"meter_type,omitempty"`
 	BoundaryMeteringPoint string    `bun:"boundary_metering_point" json:"boundary_metering_point,omitempty"`
@@ -164,11 +165,13 @@ type AggregatedConsumptionResult struct {
 	District              *string `bun:"district" json:"district,omitempty"`
 	Station               *string `bun:"station" json:"station,omitempty"`
 	FeederPanelName       *string `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
+	IC_OG                 string  `bun:"ic_og" json:"ic_og,omitempty"`
 
 	ActiveMeters          int `bun:"active_meters" json:"active_meters,omitempty"`
 	TotalMeterCount       int `bun:"total_meter_count" json:"total_meter_count,omitempty"`
 	TotalMetersByRegion   int `bun:"total_meters_by_region" json:"total_meters_by_region,omitempty"`
 	TotalMetersByDistrict int `bun:"total_meters_by_district" json:"total_meters_by_district,omitempty"`
+	AllMetersCount        int `bun:"all_meters_count" json:"all_meters_count,omitempty"`
 
 	MeterType        *string   `bun:"meter_type" json:"meter_type,omitempty"`
 	GroupPeriod      time.Time `bun:"group_period" json:"group_period"`

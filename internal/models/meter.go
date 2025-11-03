@@ -138,6 +138,7 @@ type DailyConsumptionResults struct {
 	Region                string    `bun:"region" json:"region,omitempty"`
 	District              string    `bun:"district" json:"district,omitempty"`
 	Station               string    `bun:"station" json:"station,omitempty"`
+	Location              string    `bun:"location" json:"location,omitempty"`
 	FeederPanelName       string    `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
 	IC_OG                 string    `bun:"ic_og" json:"ic_og,omitempty"`
 	VoltageKv             string    `bun:"voltage_kv" json:"voltage_kv,omitempty"`
@@ -165,6 +166,7 @@ type AggregatedConsumptionResult struct {
 	District              *string `bun:"district" json:"district,omitempty"`
 	Station               *string `bun:"station" json:"station,omitempty"`
 	FeederPanelName       *string `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
+	Location              string  `bun:"location" json:"location,omitempty"`
 	IC_OG                 string  `bun:"ic_og" json:"ic_og,omitempty"`
 
 	ActiveMeters          int `bun:"active_meters" json:"active_meters,omitempty"`

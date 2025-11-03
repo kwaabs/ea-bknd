@@ -362,43 +362,6 @@ type Filter struct {
 	Args  []interface{}
 }
 
-//func (s *MeterService) GetDailyConsumption(
-//	ctx context.Context,
-//	params models.ReadingFilterParams,
-//) ([]models.DailyConsumptionResults, error) {
-//	var results []models.DailyConsumptionResults
-//
-//	filters := buildReadingFilters(params)
-//
-//	q := s.db.NewSelect().
-//		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
-//		Column("mcd.meter_number").
-//		Column("mcd.day_start_reading").
-//		Column("mcd.day_end_reading").
-//		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) as consumed_energy").
-//		Column("dim.system_name").
-//		TableExpr("app.meter_consumption_daily AS mcd").
-//		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
-//		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id")
-//
-//	for _, f := range filters {
-//		q = q.Where(f.Query, f.Args...)
-//	}
-//
-//	q = q.
-//		Group("mcd.consumption_date").
-//		Group("mcd.meter_number").
-//		Group("dim.system_name").
-//		Group("mcd.day_start_reading").
-//		Group("mcd.day_end_reading")
-//
-//	if err := q.Scan(ctx, &results); err != nil {
-//		return nil, err
-//	}
-//
-//	return results, nil
-//}
-
 func (s *MeterService) GetDailyConsumption(
 	ctx context.Context,
 	params models.ReadingFilterParams,
@@ -414,6 +377,7 @@ func (s *MeterService) GetDailyConsumption(
 		Column("mtr.district").
 		Column("mtr.station").
 		Column("mtr.meter_type").
+		Column("mtr.location").
 		Column("mtr.voltage_kv").
 		Column("mcd.day_start_reading").
 		Column("mcd.day_end_reading").
@@ -435,6 +399,7 @@ func (s *MeterService) GetDailyConsumption(
 		Group("mtr.meter_type").
 		Group("mtr.station").
 		Group("mtr.voltage_kv").
+		Group("mtr.location").
 		Group("dim.system_name").
 		Group("mcd.day_start_reading").
 		Group("mcd.day_end_reading")
@@ -463,6 +428,7 @@ func (s *MeterService) GetRegionalBoundaryDailyConsumption(
 		Column("mtr.meter_type").
 		Column("mtr.voltage_kv").
 		Column("mtr.boundary_metering_point").
+		Column("mtr.location").
 		Column("mcd.day_start_reading").
 		Column("mcd.day_end_reading").
 		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
@@ -490,6 +456,7 @@ func (s *MeterService) GetRegionalBoundaryDailyConsumption(
 		Group("mtr.station").
 		Group("mtr.voltage_kv").
 		Group("mtr.boundary_metering_point").
+		Group("mtr.location").
 		Group("dim.system_name").
 		Group("mcd.day_start_reading").
 		Group("mcd.day_end_reading")
@@ -515,6 +482,7 @@ func (s *MeterService) GetDistrictBoundaryDailyConsumption(
 		Column("mtr.region").
 		Column("mtr.district").
 		Column("mtr.boundary_metering_point").
+		Column("mtr.location").
 		Column("mtr.station").
 		Column("mtr.meter_type").
 		Column("mtr.voltage_kv").
@@ -545,6 +513,7 @@ func (s *MeterService) GetDistrictBoundaryDailyConsumption(
 		Group("mtr.station").
 		Group("mtr.voltage_kv").
 		Group("mtr.boundary_metering_point").
+		Group("mtr.location").
 		Group("dim.system_name").
 		Group("mcd.day_start_reading").
 		Group("mcd.day_end_reading")
@@ -667,100 +636,6 @@ func (s *MeterService) GetDTXDailyConsumption(
 
 	return results, nil
 }
-
-//func (s *MeterService) GetDTXAggregatedConsumption(
-//	ctx context.Context,
-//	params models.ReadingFilterParams,
-//	groupBy string,
-//	additionalGroups []string,
-//) ([]models.AggregatedConsumptionResult, error) {
-//
-//	var results []models.AggregatedConsumptionResult
-//	filters := buildReadingFilters(params)
-//
-//	q := s.db.NewSelect().
-//		TableExpr("app.meter_consumption_daily AS mcd").
-//		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
-//		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
-//		ColumnExpr("dim.system_name AS system_name").
-//		ColumnExpr("mtr.station AS station").
-//		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
-//		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
-//		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
-//		Where("mtr.meter_type = ?", "DTX")
-//
-//	// --- Subquery for total meter count ---
-//	subQ := s.db.NewSelect().
-//		TableExpr("app.meters AS mtr2").
-//		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
-//		Where("mtr2.meter_type = ?", "DTX")
-//
-//	if len(params.Regions) > 0 {
-//		subQ = subQ.Where("mtr2.region IN (?)", bun.In(params.Regions))
-//	}
-//	if len(params.Districts) > 0 {
-//		subQ = subQ.Where("mtr2.district IN (?)", bun.In(params.Districts))
-//	}
-//	if len(params.Stations) > 0 {
-//		subQ = subQ.Where("mtr2.station IN (?)", bun.In(params.Stations))
-//	}
-//	if len(params.Locations) > 0 {
-//		subQ = subQ.Where("mtr2.location IN (?)", bun.In(params.Locations))
-//	}
-//
-//	q = q.ColumnExpr("(?) AS total_meter_count", subQ)
-//
-//	// --- Time grouping ---
-//	groupCols := []bun.Safe{
-//		bun.Safe("dim.system_name"),
-//		bun.Safe("mtr.station"),
-//		bun.Safe("mtr.feeder_panel_name"),
-//	}
-//
-//	switch groupBy {
-//	case "day":
-//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-//	case "month":
-//		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
-//	case "year":
-//		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
-//	default:
-//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-//	}
-//
-//	// --- Additional grouping ---
-//	for _, g := range additionalGroups {
-//		col := fmt.Sprintf("mtr.%s", g)
-//		if g != "meter_type" {
-//			col = fmt.Sprintf("LOWER(mtr.%s)", g)
-//		}
-//		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
-//		groupCols = append(groupCols, bun.Safe(col))
-//	}
-//
-//	// --- Apply filters (skip meter_type override) ---
-//	for _, f := range filters {
-//		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
-//			continue
-//		}
-//		q = q.Where(f.Query, f.Args...)
-//	}
-//
-//	// --- Group by all relevant columns ---
-//	for _, g := range groupCols {
-//		q = q.GroupExpr(string(g))
-//	}
-//
-//	if err := q.Scan(ctx, &results); err != nil {
-//		return nil, err
-//	}
-//
-//	return results, nil
-//}
 
 func (s *MeterService) GetDTXAggregatedConsumption(
 	ctx context.Context,
@@ -1003,292 +878,6 @@ func (s *MeterService) GetAggregatedConsumption(
 	return results, nil
 }
 
-//func (s *MeterService) GetBSPAggregatedConsumption(
-//	ctx context.Context,
-//	params models.ReadingFilterParams,
-//	groupBy string,
-//	additionalGroups []string,
-//) ([]models.AggregatedConsumptionResult, error) {
-//
-//	var results []models.AggregatedConsumptionResult
-//	filters := buildReadingFilters(params)
-//
-//	q := s.db.NewSelect().
-//		TableExpr("app.meter_consumption_daily AS mcd").
-//		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
-//		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
-//		ColumnExpr("dim.system_name AS system_name").
-//		ColumnExpr("mtr.station AS station").
-//		ColumnExpr("mtr.ic_og AS ic_og").
-//		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
-//		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
-//		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
-//		Where("mtr.meter_type = ?", "BSP")
-//
-//	// --- Subquery for total meter count ---
-//	subQ := s.db.NewSelect().
-//		TableExpr("app.meters AS mtr2").
-//		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
-//		Where("mtr2.meter_type = ?", "BSP")
-//
-//	if len(params.Regions) > 0 {
-//		subQ = subQ.Where("mtr2.region IN (?)", bun.In(params.Regions))
-//	}
-//	if len(params.Districts) > 0 {
-//		subQ = subQ.Where("mtr2.district IN (?)", bun.In(params.Districts))
-//	}
-//	if len(params.Stations) > 0 {
-//		subQ = subQ.Where("mtr2.station IN (?)", bun.In(params.Stations))
-//	}
-//	if len(params.Locations) > 0 {
-//		subQ = subQ.Where("mtr2.location IN (?)", bun.In(params.Locations))
-//	}
-//
-//	q = q.ColumnExpr("(?) AS total_meter_count", subQ)
-//
-//	// --- Time grouping ---
-//	groupCols := []bun.Safe{
-//		bun.Safe("dim.system_name"),
-//		bun.Safe("mtr.station"),
-//		bun.Safe("mtr.feeder_panel_name"),
-//		bun.Safe("mtr.ic_og"),
-//	}
-//
-//	switch groupBy {
-//	case "day":
-//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-//	case "month":
-//		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
-//	case "year":
-//		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
-//	default:
-//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-//	}
-//
-//	// --- Additional grouping ---
-//	for _, g := range additionalGroups {
-//		col := fmt.Sprintf("mtr.%s", g)
-//		if g != "meter_type" {
-//			col = fmt.Sprintf("LOWER(mtr.%s)", g)
-//		}
-//		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
-//		groupCols = append(groupCols, bun.Safe(col))
-//	}
-//
-//	// --- Apply filters (skip meter_type override) ---
-//	for _, f := range filters {
-//		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
-//			continue
-//		}
-//		q = q.Where(f.Query, f.Args...)
-//	}
-//
-//	// --- Group by all relevant columns ---
-//	for _, g := range groupCols {
-//		q = q.GroupExpr(string(g))
-//	}
-//
-//	if err := q.Scan(ctx, &results); err != nil {
-//		return nil, err
-//	}
-//
-//	return results, nil
-//}
-
-//func (s *MeterService) GetBSPAggregatedConsumption(
-//	ctx context.Context,
-//	params models.ReadingFilterParams,
-//	groupBy string,
-//	additionalGroups []string,
-//) ([]models.AggregatedConsumptionResult, error) {
-//
-//	var results []models.AggregatedConsumptionResult
-//	filters := buildReadingFilters(params)
-//
-//	q := s.db.NewSelect().
-//		TableExpr("app.meter_consumption_daily AS mcd").
-//		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
-//		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
-//		ColumnExpr("dim.system_name AS system_name").
-//		ColumnExpr("mtr.station AS station").
-//		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
-//		ColumnExpr("mtr.ic_og AS ic_og").
-//		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
-//		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
-//		Where("mtr.meter_type = ?", "BSP")
-//
-//	// --- Subquery for total meter count ---
-//	subQ := s.db.NewSelect().
-//		TableExpr("app.meters AS mtr2").
-//		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
-//		Where("mtr2.meter_type = ?", "BSP")
-//
-//	if len(params.Regions) > 0 {
-//		subQ = subQ.Where("mtr2.region IN (?)", bun.In(params.Regions))
-//	}
-//	if len(params.Districts) > 0 {
-//		subQ = subQ.Where("mtr2.district IN (?)", bun.In(params.Districts))
-//	}
-//	if len(params.Stations) > 0 {
-//		subQ = subQ.Where("mtr2.station IN (?)", bun.In(params.Stations))
-//	}
-//	if len(params.Locations) > 0 {
-//		subQ = subQ.Where("mtr2.location IN (?)", bun.In(params.Locations))
-//	}
-//
-//	q = q.ColumnExpr("(?) AS total_meter_count", subQ)
-//
-//	// --- Time grouping ---
-//	groupCols := []bun.Safe{
-//		bun.Safe("dim.system_name"),
-//		bun.Safe("mtr.station"),
-//		bun.Safe("mtr.feeder_panel_name"),
-//		bun.Safe("mtr.ic_og"),
-//	}
-//
-//	switch groupBy {
-//	case "day":
-//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-//	case "month":
-//		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
-//	case "year":
-//		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
-//	default:
-//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-//	}
-//
-//	// --- Additional grouping ---
-//	for _, g := range additionalGroups {
-//		col := fmt.Sprintf("mtr.%s", g)
-//		if g != "meter_type" {
-//			col = fmt.Sprintf("LOWER(mtr.%s)", g)
-//		}
-//		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
-//		groupCols = append(groupCols, bun.Safe(col))
-//	}
-//
-//	// --- Apply filters (skip meter_type override) ---
-//	for _, f := range filters {
-//		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
-//			continue
-//		}
-//		q = q.Where(f.Query, f.Args...)
-//	}
-//
-//	// --- Group by all relevant columns ---
-//	for _, g := range groupCols {
-//		q = q.GroupExpr(string(g))
-//	}
-//
-//	if err := q.Scan(ctx, &results); err != nil {
-//		return nil, err
-//	}
-//
-//	return results, nil
-//}
-
-//func (s *MeterService) GetBSPAggregatedConsumption(
-//	ctx context.Context,
-//	params models.ReadingFilterParams,
-//	groupBy string,
-//	additionalGroups []string,
-//) ([]models.AggregatedConsumptionResult, error) {
-//
-//	var results []models.AggregatedConsumptionResult
-//	filters := buildReadingFilters(params)
-//
-//	q := s.db.NewSelect().
-//		TableExpr("app.meter_consumption_daily AS mcd").
-//		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
-//		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
-//		ColumnExpr("dim.system_name AS system_name").
-//		ColumnExpr("mtr.station AS station").
-//		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
-//		ColumnExpr("mtr.ic_og AS ic_og").
-//		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
-//		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
-//		Where("mtr.meter_type = ?", "BSP")
-//
-//	// --- Subquery for total_meter_count (filtered same as main) ---
-//	subQ := s.db.NewSelect().
-//		TableExpr("app.meters AS mtr2").
-//		Join("JOIN app.meter_consumption_daily AS mcd2 ON mcd2.meter_number = mtr2.meter_number").
-//		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
-//		Where("mtr2.meter_type = ?", "BSP")
-//
-//	// Apply all filters to subquery (replace mtr→mtr2, mcd→mcd2)
-//	for _, f := range filters {
-//		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
-//		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
-//		if strings.Contains(strings.ToLower(qry), "meter_type") {
-//			continue // skip BSP override
-//		}
-//		subQ = subQ.Where(qry, f.Args...)
-//	}
-//
-//	q = q.ColumnExpr("(?) AS total_meter_count", subQ)
-//
-//	// --- Time grouping ---
-//	groupCols := []bun.Safe{
-//		bun.Safe("dim.system_name"),
-//		bun.Safe("mtr.station"),
-//		bun.Safe("mtr.feeder_panel_name"),
-//		bun.Safe("mtr.ic_og"),
-//	}
-//
-//	switch groupBy {
-//	case "day":
-//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-//	case "month":
-//		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
-//	case "year":
-//		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
-//	default:
-//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-//	}
-//
-//	// --- Additional grouping ---
-//	for _, g := range additionalGroups {
-//		col := fmt.Sprintf("mtr.%s", g)
-//		if g != "meter_type" {
-//			col = fmt.Sprintf("LOWER(mtr.%s)", g)
-//		}
-//		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
-//		groupCols = append(groupCols, bun.Safe(col))
-//	}
-//
-//	// --- Apply filters to main query (skip meter_type override) ---
-//	for _, f := range filters {
-//		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
-//			continue
-//		}
-//		q = q.Where(f.Query, f.Args...)
-//	}
-//
-//	// --- Group by all relevant columns ---
-//	for _, g := range groupCols {
-//		q = q.GroupExpr(string(g))
-//	}
-//
-//	if err := q.Scan(ctx, &results); err != nil {
-//		return nil, err
-//	}
-//
-//	return results, nil
-//}
-
 func (s *MeterService) GetBSPAggregatedConsumption(
 	ctx context.Context,
 	params models.ReadingFilterParams,
@@ -1439,102 +1028,6 @@ func (s *MeterService) GetPSSDailyConsumption(
 		Group("dim.system_name").
 		Group("mcd.day_start_reading").
 		Group("mcd.day_end_reading")
-
-	if err := q.Scan(ctx, &results); err != nil {
-		return nil, err
-	}
-
-	return results, nil
-}
-
-func (s *MeterService) GetPSSOldAggregatedConsumption(
-	ctx context.Context,
-	params models.ReadingFilterParams,
-	groupBy string,
-	additionalGroups []string,
-) ([]models.AggregatedConsumptionResult, error) {
-
-	var results []models.AggregatedConsumptionResult
-	filters := buildReadingFilters(params)
-
-	q := s.db.NewSelect().
-		TableExpr("app.meter_consumption_daily AS mcd").
-		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
-		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
-		ColumnExpr("dim.system_name AS system_name").
-		ColumnExpr("mtr.station AS station").
-		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
-		ColumnExpr("mtr.ic_og AS ic_og").
-		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
-		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
-		Where("mtr.meter_type = ?", "PSS")
-
-	// --- Subquery for total meter count ---
-	subQ := s.db.NewSelect().
-		TableExpr("app.meters AS mtr2").
-		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
-		Where("mtr2.meter_type = ?", "PSS")
-
-	if len(params.Regions) > 0 {
-		subQ = subQ.Where("mtr2.region IN (?)", bun.In(params.Regions))
-	}
-	if len(params.Districts) > 0 {
-		subQ = subQ.Where("mtr2.district IN (?)", bun.In(params.Districts))
-	}
-	if len(params.Stations) > 0 {
-		subQ = subQ.Where("mtr2.station IN (?)", bun.In(params.Stations))
-	}
-	if len(params.Locations) > 0 {
-		subQ = subQ.Where("mtr2.location IN (?)", bun.In(params.Locations))
-	}
-
-	q = q.ColumnExpr("(?) AS total_meter_count", subQ)
-
-	// --- Time grouping ---
-	groupCols := []bun.Safe{
-		bun.Safe("dim.system_name"),
-		bun.Safe("mtr.station"),
-		bun.Safe("mtr.feeder_panel_name"),
-		bun.Safe("mtr.ic_og"),
-	}
-
-	switch groupBy {
-	case "day":
-		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-	case "month":
-		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
-		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
-	case "year":
-		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
-		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
-	default:
-		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-	}
-
-	// --- Additional grouping ---
-	for _, g := range additionalGroups {
-		col := fmt.Sprintf("mtr.%s", g)
-		if g != "meter_type" {
-			col = fmt.Sprintf("LOWER(mtr.%s)", g)
-		}
-		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
-		groupCols = append(groupCols, bun.Safe(col))
-	}
-
-	// --- Apply filters (skip meter_type override) ---
-	for _, f := range filters {
-		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
-			continue
-		}
-		q = q.Where(f.Query, f.Args...)
-	}
-
-	// --- Group by all relevant columns ---
-	for _, g := range groupCols {
-		q = q.GroupExpr(string(g))
-	}
 
 	if err := q.Scan(ctx, &results); err != nil {
 		return nil, err
@@ -1699,100 +1192,6 @@ func (s *MeterService) GetSSDailyConsumption(
 	return results, nil
 }
 
-func (s *MeterService) GetSSOldAggregatedConsumption(
-	ctx context.Context,
-	params models.ReadingFilterParams,
-	groupBy string,
-	additionalGroups []string,
-) ([]models.AggregatedConsumptionResult, error) {
-
-	var results []models.AggregatedConsumptionResult
-	filters := buildReadingFilters(params)
-
-	q := s.db.NewSelect().
-		TableExpr("app.meter_consumption_daily AS mcd").
-		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
-		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
-		ColumnExpr("dim.system_name AS system_name").
-		ColumnExpr("mtr.station AS station").
-		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
-		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
-		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
-		Where("mtr.meter_type = ?", "SS")
-
-	// --- Subquery for total meter count ---
-	subQ := s.db.NewSelect().
-		TableExpr("app.meters AS mtr2").
-		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
-		Where("mtr2.meter_type = ?", "SS")
-
-	if len(params.Regions) > 0 {
-		subQ = subQ.Where("mtr2.region IN (?)", bun.In(params.Regions))
-	}
-	if len(params.Districts) > 0 {
-		subQ = subQ.Where("mtr2.district IN (?)", bun.In(params.Districts))
-	}
-	if len(params.Stations) > 0 {
-		subQ = subQ.Where("mtr2.station IN (?)", bun.In(params.Stations))
-	}
-	if len(params.Locations) > 0 {
-		subQ = subQ.Where("mtr2.location IN (?)", bun.In(params.Locations))
-	}
-
-	q = q.ColumnExpr("(?) AS total_meter_count", subQ)
-
-	// --- Time grouping ---
-	groupCols := []bun.Safe{
-		bun.Safe("dim.system_name"),
-		bun.Safe("mtr.station"),
-		bun.Safe("mtr.feeder_panel_name"),
-	}
-
-	switch groupBy {
-	case "day":
-		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-	case "month":
-		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
-		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
-	case "year":
-		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
-		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
-	default:
-		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
-		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
-	}
-
-	// --- Additional grouping ---
-	for _, g := range additionalGroups {
-		col := fmt.Sprintf("mtr.%s", g)
-		if g != "meter_type" {
-			col = fmt.Sprintf("LOWER(mtr.%s)", g)
-		}
-		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
-		groupCols = append(groupCols, bun.Safe(col))
-	}
-
-	// --- Apply filters (skip meter_type override) ---
-	for _, f := range filters {
-		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
-			continue
-		}
-		q = q.Where(f.Query, f.Args...)
-	}
-
-	// --- Group by all relevant columns ---
-	for _, g := range groupCols {
-		q = q.GroupExpr(string(g))
-	}
-
-	if err := q.Scan(ctx, &results); err != nil {
-		return nil, err
-	}
-
-	return results, nil
-}
-
 func (s *MeterService) GetSSAggregatedConsumption(
 	ctx context.Context,
 	params models.ReadingFilterParams,
@@ -1910,6 +1309,7 @@ func (s *MeterService) GetRegionalBoundaryAggregatedConsumption(
 		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
 		ColumnExpr("dim.system_name AS system_name").
 		ColumnExpr("mtr.boundary_metering_point AS boundary_metering_point").
+		ColumnExpr("mtr.location AS location").
 		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
 		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
 		Where("mtr.meter_type = ?", "REGIONAL_BOUNDARY")
@@ -1939,6 +1339,7 @@ func (s *MeterService) GetRegionalBoundaryAggregatedConsumption(
 	groupCols := []bun.Safe{
 		bun.Safe("dim.system_name"),
 		bun.Safe("mtr.boundary_metering_point"), // ✅ Add here!
+		bun.Safe("mtr.location"),                // ✅ Add here!
 	}
 
 	switch groupBy {
@@ -2002,6 +1403,7 @@ func (s *MeterService) GetDistrictBoundaryAggregatedConsumption(
 		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
 		ColumnExpr("dim.system_name AS system_name").
 		ColumnExpr("mtr.boundary_metering_point AS boundary_metering_point").
+		ColumnExpr("mtr.location AS location").
 		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
 		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
 		Where("mtr.meter_type = ?", "DISTRICT_BOUNDARY")
@@ -2031,6 +1433,7 @@ func (s *MeterService) GetDistrictBoundaryAggregatedConsumption(
 	groupCols := []bun.Safe{
 		bun.Safe("dim.system_name"),
 		bun.Safe("mtr.boundary_metering_point"), // ✅ Add here!
+		bun.Safe("mtr.location"),                // ✅ Add here!
 	}
 
 	switch groupBy {

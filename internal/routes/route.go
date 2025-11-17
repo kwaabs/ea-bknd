@@ -109,6 +109,9 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 				r.Get("/daily/ss", meterHandler.GetSSDailyConsumption)
 				r.Get("/aggregate/ss", meterHandler.GetSSAggregatedConsumption)
 
+				r.Get("/daily/feeder-trafo", meterHandler.GetFeederDailyConsumption)
+				r.Get("/aggregate/feeder-trafo", meterHandler.GetFeederAggregatedConsumption)
+
 				r.Get("/daily/dtx", meterHandler.GetDTXDailyConsumption)
 				r.Get("/aggregate/dtx", meterHandler.GetDTXAggregatedConsumption)
 

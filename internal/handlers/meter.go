@@ -283,6 +283,127 @@ func (h *MeterHandler) GetBSPDailyConsumption(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, results)
 }
 
+func (h *MeterHandler) GetFeederAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
+		return
+	}
+
+	// Helper to split comma-separated params
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Parse grouping options
+	groupBy := q.Get("groupBy") // e.g. "day", "month", "year"
+	if groupBy == "" {
+		groupBy = "day"
+	}
+	additionalGroups := splitCSV(q.Get("group")) // e.g. "region,station"
+
+	// Parse meter types - default to all types if not specified
+	meterTypes := splitCSV(q.Get("meterType"))
+	if len(meterTypes) == 0 {
+		meterTypes = []string{"BSP", "PSS", "SS"} // Default to all types
+	}
+
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		Voltages:              splitCSV(q.Get("voltage_kv")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            meterTypes,
+	}
+
+	results, err := h.service.GetFeederAggregatedConsumption(ctx, params, groupBy, additionalGroups, meterTypes)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, results)
+}
+
+func (h *MeterHandler) GetFeederDailyConsumption(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
+		return
+	}
+
+	// Helper to split comma-separated params
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Parse meter types - default to all types if not specified
+	meterTypes := splitCSV(q.Get("meterType"))
+	if len(meterTypes) == 0 {
+		meterTypes = []string{"BSP", "PSS", "SS"} // Default to all types
+	}
+
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		Voltages:              splitCSV(q.Get("voltage_kv")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            meterTypes,
+	}
+
+	results, err := h.service.GetFeederDailyConsumption(ctx, params, meterTypes)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, results)
+}
+
 func (h *MeterHandler) GetBSPAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	q := r.URL.Query()

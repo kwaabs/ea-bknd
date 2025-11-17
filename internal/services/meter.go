@@ -979,6 +979,182 @@ func (s *MeterService) GetBSPAggregatedConsumption(
 	return results, nil
 }
 
+func (s *MeterService) GetFeederAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+	meterTypes []string, // New parameter to specify meter types
+) ([]models.AggregatedConsumptionResult, error) {
+
+	var results []models.AggregatedConsumptionResult
+	filters := buildReadingFilters(params)
+
+	// Validate and set default meter types if none provided
+	if len(meterTypes) == 0 {
+		meterTypes = []string{"BSP", "PSS", "SS"} // Default to all types
+	}
+
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.station AS station").
+		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+		ColumnExpr("mtr.ic_og AS ic_og").
+		ColumnExpr("mtr.meter_type AS meter_type"). // Include meter_type in results
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+		Where("mtr.meter_type IN (?)", bun.In(meterTypes)) // Use IN clause for multiple types
+
+	// --- Subquery 1: total_meter_count (filtered) ---
+	subQFiltered := s.db.NewSelect().
+		TableExpr("app.meters AS mtr2").
+		Join("JOIN app.meter_consumption_daily AS mcd2 ON mcd2.meter_number = mtr2.meter_number").
+		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+		Where("mtr2.meter_type IN (?)", bun.In(meterTypes))
+
+	for _, f := range filters {
+		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
+		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
+		if strings.Contains(strings.ToLower(qry), "meter_type") {
+			continue
+		}
+		subQFiltered = subQFiltered.Where(qry, f.Args...)
+	}
+
+	q = q.ColumnExpr("(?) AS total_meter_count", subQFiltered)
+
+	// --- Subquery 2: all_meters_count (unfiltered by specified types) ---
+	subQAll := s.db.NewSelect().
+		TableExpr("app.meters AS mtr3").
+		ColumnExpr("COUNT(DISTINCT mtr3.meter_number)").
+		Where("mtr3.meter_type IN (?)", bun.In(meterTypes))
+
+	q = q.ColumnExpr("(?) AS all_meters_count", subQAll)
+
+	// --- Time grouping ---
+	groupCols := []bun.Safe{
+		bun.Safe("dim.system_name"),
+		bun.Safe("mtr.station"),
+		bun.Safe("mtr.feeder_panel_name"),
+		bun.Safe("mtr.ic_og"),
+		bun.Safe("mtr.meter_type"), // Include meter_type in grouping
+	}
+
+	switch groupBy {
+	case "day":
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	case "month":
+		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+	case "year":
+		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+	default:
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	}
+
+	// --- Additional grouping ---
+	for _, g := range additionalGroups {
+		col := fmt.Sprintf("mtr.%s", g)
+		if g != "meter_type" {
+			col = fmt.Sprintf("LOWER(mtr.%s)", g)
+		}
+		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+		groupCols = append(groupCols, bun.Safe(col))
+	}
+
+	// --- Apply filters (skip meter_type override) ---
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// --- Group by all relevant columns ---
+	for _, g := range groupCols {
+		q = q.GroupExpr(string(g))
+	}
+
+	// Optional: Order by meter_type for consistent results
+	q = q.OrderExpr("mtr.meter_type", "group_period")
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func (s *MeterService) GetFeederDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	meterTypes []string, // New parameter to specify meter types
+) ([]models.DailyConsumptionResults, error) {
+	var results []models.DailyConsumptionResults
+
+	filters := buildReadingFilters(params)
+
+	// Validate and set default meter types if none provided
+	if len(meterTypes) == 0 {
+		meterTypes = []string{"BSP", "PSS", "SS"} // Default to all types
+	}
+
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+		Column("mcd.meter_number").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.meter_type").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.ic_og").
+		Column("mtr.voltage_kv").
+		Column("mcd.day_start_reading").
+		Column("mcd.day_end_reading").
+		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
+		Column("dim.system_name").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		Where("mtr.meter_type IN (?)", bun.In(meterTypes)) // ✅ Use IN clause for multiple types
+
+	// ✅ Apply dynamic filters (except meter_type)
+	for _, f := range filters {
+		// prevent user from overriding meter_type
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	q = q.
+		Group("mcd.consumption_date").
+		Group("mcd.meter_number").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.meter_type"). // Keep meter_type in grouping
+		Group("mtr.station").
+		Group("mtr.feeder_panel_name").
+		Group("mtr.ic_og").
+		Group("mtr.voltage_kv").
+		Group("dim.system_name").
+		Group("mcd.day_start_reading").
+		Group("mcd.day_end_reading").
+		Order("mtr.meter_type", "mcd.consumption_date") // Optional: Add ordering for consistency
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
 func (s *MeterService) GetPSSDailyConsumption(
 	ctx context.Context,
 	params models.ReadingFilterParams,
@@ -1543,7 +1719,7 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 	// Meter type (uppercase)
 	if len(params.MeterTypes) > 0 {
 		filters = append(filters, Filter{
-			Query: "upper(mtr.meter_type) IN (?)",
+			Query: "mtr.meter_type IN (?)",
 			Args:  []interface{}{bun.In(stringsToUpper(params.MeterTypes))},
 		})
 	}

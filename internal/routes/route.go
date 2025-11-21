@@ -80,6 +80,9 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 		r.Route("/meters", func(r chi.Router) {
 			//r.Use(authMW.JWTAuth) // protect with JWT
 			r.Get("/", meterHandler.QueryMeters)
+			r.Get("/status", meterHandler.GetMeterStatus)
+			r.Get("/status/counts", meterHandler.GetMeterStatusCounts)
+
 			r.Get("/{id}", meterHandler.GetMeterByID)
 
 			r.Route("/readings", func(r chi.Router) {

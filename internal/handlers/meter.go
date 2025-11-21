@@ -41,6 +41,112 @@ func (h *MeterHandler) QueryMeters(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": results})
 }
 
+func (h *MeterHandler) GetMeterStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// --- Validate dates ---
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
+		return
+	}
+
+	// --- Split helpers ---
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// --- Build filter params ---
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            splitCSV(q.Get("meterType")), // ✅ INCLUDED
+	}
+
+	// --- Execute service method ---
+	results, err := h.service.GetMeterStatus(ctx, params)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, results)
+}
+
+func (h *MeterHandler) GetMeterStatusCounts(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// --- Validate dates ---
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
+		return
+	}
+
+	// --- CSV splitter ---
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// --- Build filter params ---
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            splitCSV(q.Get("meterType")),
+	}
+
+	// --- Execute service ---
+	result, err := h.service.GetMeterStatusCounts(ctx, params)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (h *MeterHandler) GetAggregatedReadings(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 

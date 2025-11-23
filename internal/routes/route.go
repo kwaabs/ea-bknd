@@ -44,6 +44,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 	// auth service (service handles DB checks like token_version)
 	authSvc := services.NewAuthService(db, jwtMgr, cfg, logr)
 	meterSvc := services.NewMeterService(db)
+	feedbackSvc := services.NewFeedbackService(db)
 	meterMetricsSvc := services.NewMeterMetricsService(db)
 
 	// create the auth middleware instance (pass dependencies)
@@ -51,6 +52,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 
 	authHandler := handlers.NewAuthHandler(authSvc, logr, cfg)
 	meterHandler := handlers.NewMeterHandler(meterSvc, logr.Logger)
+	feedbackHandler := handlers.NewFeedbackHandler(feedbackSvc, logr.Logger)
 	meterMetricsHandler := handlers.NewMeterMetricsHandler(meterMetricsSvc, logr.Logger)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +121,18 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 				r.Get("/aggregate/dtx", meterHandler.GetDTXAggregatedConsumption)
 
 			})
+
+		})
+
+		r.Route("/feedback", func(r chi.Router) {
+			r.Post("/", feedbackHandler.CreateFeedback)
+
+			r.Get("/", feedbackHandler.GetAllFeedback)
+			r.Get("/user/{email}", feedbackHandler.GetFeedbackByEmail)
+
+			// Get all feedback (paginated)
+			r.Get("/feedback/{id}", feedbackHandler.GetFeedbackByID)               // Get single feedback with replies
+			r.Patch("/feedback/{id}/status", feedbackHandler.UpdateFeedbackStatus) // Update status
 		})
 
 	})

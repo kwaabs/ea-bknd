@@ -9,7 +9,7 @@ import (
 
 // Feedback model
 type Feedback struct {
-	bun.BaseModel `bun:"table:feedback,alias:fbk"`
+	bun.BaseModel `bun:"table:app.feedback,alias:fbk"`
 
 	ID        int64     `bun:"id,pk,autoincrement" json:"id"`
 	Email     string    `bun:"email,notnull" json:"email"`

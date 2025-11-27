@@ -8,6 +8,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"go.uber.org/zap"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
@@ -38,21 +41,37 @@ func ComparePassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
+type tokenResp struct {
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpiresAt    time.Time `json:"access_expires_at"`
+	User         *UserInfo `json:"user"` // Add this
+}
+
+type UserInfo struct {
+	ID       string   `json:"id"`
+	Email    string   `json:"email"`
+	Name     string   `json:"name"`
+	Provider string   `json:"provider"`
+	Roles    []string `json:"roles"`
+}
+
 // Local login
-func (s *AuthService) LoginLocal(ctx context.Context, email, password, deviceInfo string) (*auth.TokenPair, error) {
+// Local login - Updated to match LoginLDAP signature
+func (s *AuthService) LoginLocal(ctx context.Context, email, password, deviceInfo string) (*auth.TokenPair, *UserInfo, error) {
 	var u model.User
 	err := s.db.NewSelect().Model(&u).Where("email = ?", email).Scan(ctx)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("invalid credentials")
+			return nil, nil, fmt.Errorf("invalid credentials")
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	if u.PasswordHash == "" {
-		return nil, fmt.Errorf("account not configured for local login")
+		return nil, nil, fmt.Errorf("account not configured for local login")
 	}
 	if err := ComparePassword(u.PasswordHash, password); err != nil {
-		return nil, fmt.Errorf("invalid credentials")
+		return nil, nil, fmt.Errorf("invalid credentials")
 	}
 
 	// update last_login
@@ -62,94 +81,211 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password, deviceInf
 	// issue tokens and store refresh
 	pair, err := s.jwt.GenerateTokenPair(u.ID.String(), s.cfg.AccessTokenTTL, s.cfg.RefreshTokenTTL, u.TokenVersion, "local", u.Roles)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err := s.storeRefreshToken(ctx, u.ID, pair.RefreshToken, pair.RefreshExp, pair.JTI, deviceInfo); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return pair, nil
+	// Build UserInfo response
+	userInfo := &UserInfo{
+		ID:       u.ID.String(),
+		Email:    u.Email,
+		Name:     u.Name,
+		Provider: "local",
+		Roles:    u.Roles,
+	}
+
+	return pair, userInfo, nil
 }
 
 // LDAP login: search then bind (per your request)
-func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceInfo string) (*auth.TokenPair, error) {
+
+// LoginLDAP performs LDAP authentication and returns tokens + user info
+func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceInfo string) (*auth.TokenPair, *UserInfo, error) {
+	// Strip @ECGGH.COM if present (case insensitive)
+	cleanUsername := ldapUser
+	lowerUser := strings.ToLower(ldapUser)
+	if strings.Contains(lowerUser, "@ecggh.com") {
+		re := regexp.MustCompile(`(?i)@ecggh\.com$`)
+		cleanUsername = re.ReplaceAllString(ldapUser, "")
+	}
+
+	// Dial LDAP with timeout
+	ldap.DefaultTimeout = 10 * time.Second
 	l, err := ldap.DialURL(s.cfg.LDAPServer)
 	if err != nil {
-		return nil, fmt.Errorf("ldap dial: %w", err)
+		s.logr.Error("LDAP dial failed", zap.Error(err), zap.String("server", s.cfg.LDAPServer))
+		return nil, nil, fmt.Errorf("ldap connection failed")
 	}
-	defer l.Close()
 
-	// Bind as service user if provided to search
-	if s.cfg.LDAPBindDN != "" {
-		if err = l.Bind(s.cfg.LDAPBindDN, s.cfg.LDAPBindPass); err != nil {
-			return nil, fmt.Errorf("ldap bind service account: %w", err)
+	// CRITICAL: Always close connection, even on panic
+	defer func() {
+		if l != nil {
+			if closeErr := l.Close(); closeErr != nil {
+				s.logr.Debug("LDAP close error (usually harmless)", zap.Error(closeErr))
+			}
 		}
+	}()
+
+	// Set connection timeout
+	l.SetTimeout(30 * time.Second)
+
+	// Form DN: username@ECGGH.COM
+	userDN := fmt.Sprintf("%s@ECGGH.COM", cleanUsername)
+
+	// 1) Bind as user to authenticate
+	if err = l.Bind(userDN, ldapPass); err != nil {
+		s.logr.Warn("LDAP bind failed", zap.String("username", cleanUsername))
+		return nil, nil, fmt.Errorf("invalid credentials")
 	}
 
-	// Search for the user DN
+	// 2) Search for user attributes
 	searchReq := ldap.NewSearchRequest(
-		s.cfg.LDAPBaseDN,
-		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		fmt.Sprintf("(uid=%s)", ldap.EscapeFilter(ldapUser)),
-		[]string{"dn", "mail", "cn"},
+		"dc=ecggh,dc=com",
+		ldap.ScopeWholeSubtree,
+		ldap.NeverDerefAliases,
+		0,
+		0,
+		false,
+		fmt.Sprintf("(sAMAccountName=%s)", ldap.EscapeFilter(cleanUsername)),
+		[]string{"cn", "givenName", "sn", "mail", "memberOf", "employeeID", "telephoneNumber", "displayName"},
 		nil,
 	)
 
 	sr, err := l.Search(searchReq)
 	if err != nil {
-		return nil, fmt.Errorf("ldap search: %w", err)
+		s.logr.Error("LDAP search failed", zap.Error(err), zap.String("username", cleanUsername))
+		return nil, nil, fmt.Errorf("user lookup failed")
 	}
+
 	if len(sr.Entries) == 0 {
-		return nil, fmt.Errorf("ldap: user not found")
-	}
-	userDN := sr.Entries[0].DN
-	mail := sr.Entries[0].GetAttributeValue("mail")
-	cn := sr.Entries[0].GetAttributeValue("cn")
-
-	// Try to bind as the user to verify credentials
-	if err = l.Bind(userDN, ldapPass); err != nil {
-		return nil, fmt.Errorf("ldap bind user failed: %w", err)
+		s.logr.Warn("LDAP: no entry found", zap.String("username", cleanUsername))
+		return nil, nil, fmt.Errorf("user not found in directory")
 	}
 
-	// Provision or fetch local user
-	var u model.User
-	err = s.db.NewSelect().Model(&u).Where("email = ?", mail).Scan(ctx)
-	if err != nil {
-		// create user
-		u = model.User{
-			Email:    mail,
-			Provider: "ldap",
-			Name:     cn,
+	// Extract attributes
+	entry := sr.Entries[0]
+	displayName := entry.GetAttributeValue("displayName")
+	givenName := entry.GetAttributeValue("givenName")
+	sn := entry.GetAttributeValue("sn")
+	mail := entry.GetAttributeValue("mail")
+
+	if mail == "" {
+		s.logr.Error("LDAP user missing email", zap.String("username", cleanUsername))
+		return nil, nil, fmt.Errorf("user account missing email")
+	}
+
+	// Parse name
+	var firstName, lastName string
+	if displayName != "" {
+		nameParts := strings.Fields(displayName)
+		if len(nameParts) > 0 {
+			firstName = nameParts[0]
+			lastName = nameParts[len(nameParts)-1]
 		}
-		_, err = s.db.NewInsert().Model(&u).Exec(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("create user: %w", err)
+	}
+	if firstName == "" {
+		firstName = givenName
+	}
+	if lastName == "" {
+		lastName = sn
+	}
+
+	fullName := displayName
+	if fullName == "" {
+		fullName = entry.GetAttributeValue("cn")
+	}
+	if fullName == "" {
+		fullName = cleanUsername
+	}
+
+	// Close LDAP connection NOW before DB operations
+	l.Close()
+	l = nil // Prevent double-close in defer
+
+	s.logr.Debug("LDAP auth successful", zap.String("username", cleanUsername), zap.String("email", mail))
+
+	// Database operations (user provisioning)
+	var u model.User
+	err = s.db.NewSelect().
+		Model(&u).
+		Column("id", "email", "provider", "name", "roles", "token_version", "created_at"). // Only needed columns
+		Where("email = ?", mail).
+		Scan(ctx)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Create new user
+			u = model.User{
+				Email:    mail,
+				Provider: "ldap",
+				Name:     fullName,
+				Roles:    []string{"user"}, // Default role
+			}
+			_, err = s.db.NewInsert().Model(&u).Exec(ctx)
+			if err != nil {
+				s.logr.Error("Failed to create user", zap.Error(err), zap.String("email", mail))
+				return nil, nil, fmt.Errorf("failed to create user account")
+			}
+			s.logr.Info("Created new LDAP user", zap.String("email", mail), zap.String("id", u.ID.String()))
+		} else {
+			s.logr.Error("Database error", zap.Error(err), zap.String("email", mail))
+			return nil, nil, fmt.Errorf("database error")
 		}
 	} else {
-		// ensure provider is ldap
+		// Update provider if needed
 		if u.Provider != "ldap" {
-			// you may decide to link accounts; for now keep provider as found
-			u.Provider = "ldap"
-			_, _ = s.db.NewUpdate().Model(&u).Where("id = ?", u.ID).Exec(ctx)
+			_, _ = s.db.NewUpdate().Model(&u).
+				Set("provider = ?", "ldap").
+				Where("id = ?", u.ID).
+				Exec(ctx)
 		}
 	}
 
-	// update last_login
+	// Update last login
 	now := time.Now().UTC()
-	_, _ = s.db.NewUpdate().Model(&model.User{LastLoginAt: &now}).Where("id = ?", u.ID).Exec(ctx)
+	_, _ = s.db.NewUpdate().
+		Model(&model.User{LastLoginAt: &now}).
+		Where("id = ?", u.ID).
+		Exec(ctx)
 
-	// issue token pair
-	pair, err := s.jwt.GenerateTokenPair(u.ID.String(), s.cfg.AccessTokenTTL, s.cfg.RefreshTokenTTL, u.TokenVersion, "ldap", u.Roles)
+	// Generate tokens
+	pair, err := s.jwt.GenerateTokenPair(
+		u.ID.String(),
+		s.cfg.AccessTokenTTL,
+		s.cfg.RefreshTokenTTL,
+		u.TokenVersion,
+		"ldap",
+		u.Roles,
+	)
 	if err != nil {
-		return nil, err
+		s.logr.Error("Token generation failed", zap.Error(err), zap.String("user_id", u.ID.String()))
+		return nil, nil, fmt.Errorf("failed to generate tokens")
 	}
 
+	// Store refresh token
 	if err := s.storeRefreshToken(ctx, u.ID, pair.RefreshToken, pair.RefreshExp, pair.JTI, deviceInfo); err != nil {
-		return nil, err
+		s.logr.Error("Failed to store refresh token", zap.Error(err), zap.String("user_id", u.ID.String()))
+		return nil, nil, fmt.Errorf("failed to store session")
 	}
 
-	return pair, nil
+	// Build response
+	userInfo := &UserInfo{
+		ID:       u.ID.String(),
+		Email:    mail,
+		Name:     fullName,
+		Provider: "ldap",
+		Roles:    u.Roles,
+	}
+
+	s.logr.Info("LDAP login successful",
+		zap.String("user_id", u.ID.String()),
+		zap.String("email", mail),
+		zap.String("username", cleanUsername))
+
+	return pair, userInfo, nil
 }
 
 // storeRefreshToken stores refresh token hashed and enforces 2 sessions per user

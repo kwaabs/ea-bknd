@@ -54,11 +54,12 @@ func Load() *Config {
 		JWTPublicKeyPath:  getEnv("JWT_PUBLIC_KEY_PATH", "keys/jwt_public.pem"),
 		AccessTokenTTL:    time.Duration(accessTTLMin) * time.Minute,      // default 15m
 		RefreshTokenTTL:   time.Duration(refreshTTLDays) * 24 * time.Hour, // default 10d
-		LDAPServer:        getEnv("LDAP_SERVER", "ldap://ldap.example.com:389"),
-		LDAPBindDN:        getEnv("LDAP_BIND_DN", ""),
-		LDAPBindPass:      getEnv("LDAP_BIND_PASS", ""),
-		LDAPBaseDN:        getEnv("LDAP_BASE_DN", ""),
-		AllowedOrigins:    allowedOrigins, // Add this
+		//LDAPServer:        getEnv("LDAP_SERVER", "ldap://ldap.example.com:389"),
+		LDAPServer:     getEnv("LDAP_SERVER", "ldap://localhost:10389"),
+		LDAPBindDN:     getEnv("LDAP_BIND_DN", ""),
+		LDAPBindPass:   getEnv("LDAP_BIND_PASS", ""),
+		LDAPBaseDN:     getEnv("LDAP_BASE_DN", ""),
+		AllowedOrigins: allowedOrigins, // Add this
 	}
 }
 

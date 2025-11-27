@@ -32,10 +32,19 @@ type ldapReq struct {
 	DeviceInfo string `json:"device_info"`
 }
 
+type userInfo struct {
+	ID       string   `json:"id"`
+	Email    string   `json:"email"`
+	Name     string   `json:"name"`
+	Provider string   `json:"provider"`
+	Roles    []string `json:"roles"`
+}
+
 type tokenResp struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
 	ExpiresAt    time.Time `json:"access_expires_at"`
+	User         *userInfo `json:"user"` // Added user info
 }
 
 // POST /auth/login
@@ -45,7 +54,7 @@ func (h *AuthHandler) LoginLocal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
-	pair, err := h.authSvc.LoginLocal(r.Context(), req.Email, req.Password, req.DeviceInfo)
+	pair, user, err := h.authSvc.LoginLocal(r.Context(), req.Email, req.Password, req.DeviceInfo)
 	if err != nil {
 		h.logr.Warn("local login failed", zap.Error(err), zap.String("email", req.Email))
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
@@ -56,8 +65,15 @@ func (h *AuthHandler) LoginLocal(w http.ResponseWriter, r *http.Request) {
 	h.setRefreshCookie(w, pair.RefreshToken, pair.RefreshExp)
 	resp := tokenResp{
 		AccessToken:  pair.AccessToken,
-		RefreshToken: pair.RefreshToken, // included in JSON as you asked "both"
+		RefreshToken: pair.RefreshToken,
 		ExpiresAt:    pair.AccessExp,
+		User: &userInfo{
+			ID:       user.ID,
+			Email:    user.Email,
+			Name:     user.Name,
+			Provider: user.Provider,
+			Roles:    user.Roles,
+		},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -70,7 +86,7 @@ func (h *AuthHandler) LoginLDAP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
-	pair, err := h.authSvc.LoginLDAP(r.Context(), req.Username, req.Password, req.DeviceInfo)
+	pair, user, err := h.authSvc.LoginLDAP(r.Context(), req.Username, req.Password, req.DeviceInfo)
 	if err != nil {
 		h.logr.Warn("ldap login failed", zap.Error(err), zap.String("username", req.Username))
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
@@ -82,6 +98,13 @@ func (h *AuthHandler) LoginLDAP(w http.ResponseWriter, r *http.Request) {
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,
 		ExpiresAt:    pair.AccessExp,
+		User: &userInfo{
+			ID:       user.ID,
+			Email:    user.Email,
+			Name:     user.Name,
+			Provider: user.Provider,
+			Roles:    user.Roles,
+		},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -120,6 +143,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,
 		ExpiresAt:    pair.AccessExp,
+		User:         nil, // No user info on refresh (token already has user claims)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

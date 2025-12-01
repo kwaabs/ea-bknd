@@ -182,6 +182,7 @@ type AggregatedConsumptionResult struct {
 
 type MeterStatusResult struct {
 	ConsumptionDate       *time.Time `bun:"consumption_date" json:"consumption_date"`
+	LastConsumptionDate   *time.Time `bun:"last_consumption_date" json:"last_consumption_date,omitempty"`
 	MeterNumber           string     `bun:"meter_number" json:"meter_number"`
 	MeterType             *string    `bun:"meter_type" json:"meter_type,omitempty"`
 	BoundaryMeteringPoint *string    `bun:"boundary_metering_point" json:"boundary_metering_point,omitempty"`
@@ -192,7 +193,11 @@ type MeterStatusResult struct {
 	District              string     `bun:"district" json:"district,omitempty"`
 	Status                string     `bun:"status" json:"status"`
 	Consumption           *float64   `bun:"consumption" json:"consumption"`
+	TotalConsumption      *float64   `bun:"total_consumption" json:"total_consumption,omitempty"`
 	ReadingCount          *int       `bun:"reading_count" json:"reading_count"`
+	TotalReadingCount     *int       `bun:"total_reading_count" json:"total_reading_count,omitempty"`
 	DayStartTime          *time.Time `bun:"day_start_time" json:"day_start_time"`
+	FirstDayStartTime     *time.Time `bun:"first_day_start_time" json:"first_day_start_time,omitempty"`
 	DayEndTime            *time.Time `bun:"day_end_time" json:"day_end_time"`
+	LastDayEndTime        *time.Time `bun:"last_day_end_time" json:"last_day_end_time,omitempty"`
 }

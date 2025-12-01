@@ -1657,61 +1657,190 @@ func (s *MeterService) GetDistrictBoundaryAggregatedConsumption(
 	return results, nil
 }
 
-func (s *MeterService) GetMeterStatus(
-	ctx context.Context,
-	params models.ReadingFilterParams,
-) ([]models.MeterStatusResult, error) {
+//func (s *MeterService) GetMeterStatus(
+//	ctx context.Context,
+//	params models.ReadingFilterParams,
+//) ([]models.MeterStatusResult, error) {
+//
+//	results := []models.MeterStatusResult{}
+//
+//	filters := buildReadingFilters(params)
+//
+//	q := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr").
+//		Column("mcd.consumption_date").
+//		Column("mtr.meter_number").
+//		Column("mtr.meter_type").
+//		Column("mtr.region").
+//		Column("mtr.district").
+//		Column("mtr.boundary_metering_point").
+//		Column("mtr.location").
+//		Column("mtr.station").
+//		Column("mtr.feeder_panel_name").
+//		Column("mtr.location").
+//		ColumnExpr(`
+//            CASE
+//                WHEN mcd.meter_number IS NULL THEN 'OFFLINE - No Record'
+//                WHEN mcd.data_item_id = 'NO_DATA' THEN 'OFFLINE - No Data'
+//                ELSE 'ONLINE'
+//            END AS status`).
+//		Column("mcd.consumption").
+//		Column("mcd.reading_count").
+//		Column("mcd.day_start_time").
+//		Column("mcd.day_end_time").
+//		Join(`LEFT JOIN app.meter_consumption_daily AS mcd
+//              ON mtr.meter_number = mcd.meter_number
+//              AND mcd.consumption_date BETWEEN ? AND ?`,
+//			params.DateFrom, params.DateTo)
+//
+//	// 🔥 Apply dynamic meter filters (region, meter_type, station, etc.)
+//	for _, f := range filters {
+//		// skip date filter because we applied date range in the LEFT JOIN
+//		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+//			continue
+//		}
+//		q = q.Where(f.Query, f.Args...)
+//	}
+//
+//	// Sorting exactly as your SQL
+//	q = q.OrderExpr(`
+//        CASE
+//            WHEN mcd.meter_number IS NULL THEN 1
+//            WHEN mcd.data_item_id = 'NO_DATA' THEN 2
+//            ELSE 3
+//        END ASC,
+//        mtr.meter_number ASC
+//    `)
+//
+//	if err := q.Scan(ctx, &results); err != nil {
+//		return nil, err
+//	}
+//
+//	return results, nil
+//}
+//
+//func (s *MeterService) GetMeterStatusCounts(
+//	ctx context.Context,
+//	params models.ReadingFilterParams,
+//) (map[string]int, error) {
+//
+//	counts := map[string]int{
+//		"total":             0,
+//		"online":            0,
+//		"offline_no_record": 0,
+//		"offline_no_data":   0,
+//	}
+//
+//	// Build dynamic filters for meters
+//	filters := buildReadingFilters(params)
+//
+//	// Base query
+//	q := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr").
+//		ColumnExpr(`
+//			COUNT(DISTINCT CASE WHEN mcd.meter_number IS NULL THEN mtr.id END) AS offline_no_record
+//		`).
+//		ColumnExpr(`
+//			COUNT(DISTINCT CASE WHEN mcd.data_item_id = 'NO_DATA' THEN mtr.id END) AS offline_no_data
+//		`).
+//		ColumnExpr(`
+//			COUNT(DISTINCT CASE WHEN mcd.meter_number IS NOT NULL AND mcd.data_item_id != 'NO_DATA' THEN mtr.id END) AS online
+//		`).
+//		Join(`
+//			LEFT JOIN (
+//				SELECT meter_number,
+//					   MAX(data_item_id) AS data_item_id,
+//					   MAX(consumption_date) AS last_consumption_date
+//				FROM app.meter_consumption_daily
+//				WHERE consumption_date BETWEEN ? AND ?
+//				GROUP BY meter_number
+//			) AS mcd
+//			ON mtr.meter_number = mcd.meter_number
+//		`, params.DateFrom, params.DateTo)
+//
+//	// Apply filters on meters table
+//	for _, f := range filters {
+//		// If the filter is for mcd.consumption_date, replace with last_consumption_date
+//		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+//			f.Query = strings.ReplaceAll(f.Query, "mcd.consumption_date", "mcd.last_consumption_date")
+//		}
+//		q = q.Where(f.Query, f.Args...)
+//	}
+//
+//	// Optional: dynamic filters on mcd fields (like last_consumption_date)
+//	// Example: if params specify a date filter outside the join range
+//	// q = q.Where("mcd.last_consumption_date BETWEEN ? AND ?", params.SomeFrom, params.SomeTo)
+//
+//	// Result struct
+//	var row struct {
+//		Online          int `bun:"online"`
+//		OfflineNoRecord int `bun:"offline_no_record"`
+//		OfflineNoData   int `bun:"offline_no_data"`
+//	}
+//
+//	if err := q.Scan(ctx, &row); err != nil {
+//		return nil, err
+//	}
+//
+//	counts["online"] = row.Online
+//	counts["offline_no_record"] = row.OfflineNoRecord
+//	counts["offline_no_data"] = row.OfflineNoData
+//	counts["total"] = row.Online + row.OfflineNoRecord + row.OfflineNoData
+//
+//	return counts, nil
+//}
 
-	results := []models.MeterStatusResult{}
-
-	filters := buildReadingFilters(params)
+func (s *MeterService) GetMeterStatus(ctx context.Context, params models.ReadingFilterParams) ([]models.MeterStatusResult, error) {
+	var results []models.MeterStatusResult
 
 	q := s.db.NewSelect().
 		TableExpr("app.meters AS mtr").
-		Column("mcd.consumption_date").
+		// Select meter master data
 		Column("mtr.meter_number").
 		Column("mtr.meter_type").
 		Column("mtr.region").
 		Column("mtr.district").
 		Column("mtr.boundary_metering_point").
-		Column("mtr.location").
 		Column("mtr.station").
 		Column("mtr.feeder_panel_name").
 		Column("mtr.location").
+
+		// Daily consumption fields
+		Column("mcd.consumption_date").
+		Column("mcd.consumption").
+		Column("mcd.reading_count").
+		Column("mcd.day_start_time").
+		Column("mcd.day_end_time").
+
+		// Computed status
 		ColumnExpr(`
             CASE
                 WHEN mcd.meter_number IS NULL THEN 'OFFLINE - No Record'
                 WHEN mcd.data_item_id = 'NO_DATA' THEN 'OFFLINE - No Data'
                 ELSE 'ONLINE'
             END AS status`).
-		Column("mcd.consumption").
-		Column("mcd.reading_count").
-		Column("mcd.day_start_time").
-		Column("mcd.day_end_time").
-		Join(`LEFT JOIN app.meter_consumption_daily AS mcd 
-              ON mtr.meter_number = mcd.meter_number
-              AND mcd.consumption_date BETWEEN ? AND ?`,
-			params.DateFrom, params.DateTo)
 
-	// 🔥 Apply dynamic meter filters (region, meter_type, station, etc.)
-	for _, f := range filters {
-		// skip date filter because we applied date range in the LEFT JOIN
-		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
-			continue
-		}
-		q = q.Where(f.Query, f.Args...)
+		// Join by meter_number + date range
+		Join(`
+            LEFT JOIN app.meter_consumption_daily AS mcd
+            ON mtr.meter_number = mcd.meter_number
+            AND mcd.consumption_date BETWEEN ? AND ?
+        `, params.DateFrom, params.DateTo)
+
+	// Optional filtering
+	if len(params.MeterNumber) > 0 {
+		q = q.Where("mtr.meter_number IN (?)", bun.In(params.MeterNumber))
 	}
 
-	// Sorting exactly as your SQL
-	q = q.OrderExpr(`
-        CASE 
-            WHEN mcd.meter_number IS NULL THEN 1
-            WHEN mcd.data_item_id = 'NO_DATA' THEN 2
-            ELSE 3
-        END ASC,
-        mtr.meter_number ASC
-    `)
+	if len(params.Regions) > 0 {
+		q = q.Where("mtr.region IN (?)", bun.In(params.Regions))
+	}
 
+	if len(params.Districts) > 0 {
+		q = q.Where("mtr.district IN (?)", bun.In(params.Districts))
+	}
+
+	// Execute
 	if err := q.Scan(ctx, &results); err != nil {
 		return nil, err
 	}
@@ -1731,47 +1860,42 @@ func (s *MeterService) GetMeterStatusCounts(
 		"offline_no_data":   0,
 	}
 
-	// Build dynamic filters for meters
 	filters := buildReadingFilters(params)
 
-	// Base query
+	// 🔥 Fixed query using BOOL_OR approach
 	q := s.db.NewSelect().
 		TableExpr("app.meters AS mtr").
 		ColumnExpr(`
-			COUNT(DISTINCT CASE WHEN mcd.meter_number IS NULL THEN mtr.id END) AS offline_no_record
-		`).
+          COUNT(DISTINCT CASE WHEN mcd.meter_number IS NULL THEN mtr.id END) AS offline_no_record
+       `).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE WHEN mcd.data_item_id = 'NO_DATA' THEN mtr.id END) AS offline_no_data
-		`).
+          COUNT(DISTINCT CASE WHEN mcd.has_actual_data = false THEN mtr.id END) AS offline_no_data
+       `).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE WHEN mcd.meter_number IS NOT NULL AND mcd.data_item_id != 'NO_DATA' THEN mtr.id END) AS online
-		`).
+          COUNT(DISTINCT CASE WHEN mcd.has_actual_data = true THEN mtr.id END) AS online
+       `).
 		Join(`
-			LEFT JOIN (
-				SELECT meter_number,
-					   MAX(data_item_id) AS data_item_id,
-					   MAX(consumption_date) AS last_consumption_date
-				FROM app.meter_consumption_daily
-				WHERE consumption_date BETWEEN ? AND ?
-				GROUP BY meter_number
-			) AS mcd
-			ON mtr.meter_number = mcd.meter_number
-		`, params.DateFrom, params.DateTo)
+          LEFT JOIN (
+             SELECT 
+                meter_number,
+                MAX(consumption_date) AS last_consumption_date,
+                BOOL_OR(data_item_id != 'NO_DATA' AND data_item_id = '00100000') AS has_actual_data
+             FROM app.meter_consumption_daily
+             WHERE consumption_date BETWEEN ? AND ?
+             GROUP BY meter_number
+          ) AS mcd
+          ON mtr.meter_number = mcd.meter_number
+       `, params.DateFrom, params.DateTo)
 
 	// Apply filters on meters table
 	for _, f := range filters {
-		// If the filter is for mcd.consumption_date, replace with last_consumption_date
+		// Skip date filters since they're already in the subquery
 		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
-			f.Query = strings.ReplaceAll(f.Query, "mcd.consumption_date", "mcd.last_consumption_date")
+			continue
 		}
 		q = q.Where(f.Query, f.Args...)
 	}
 
-	// Optional: dynamic filters on mcd fields (like last_consumption_date)
-	// Example: if params specify a date filter outside the join range
-	// q = q.Where("mcd.last_consumption_date BETWEEN ? AND ?", params.SomeFrom, params.SomeTo)
-
-	// Result struct
 	var row struct {
 		Online          int `bun:"online"`
 		OfflineNoRecord int `bun:"offline_no_record"`

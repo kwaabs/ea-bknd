@@ -1795,7 +1795,6 @@ func (s *MeterService) GetMeterStatus(ctx context.Context, params models.Reading
 
 	q := s.db.NewSelect().
 		TableExpr("app.meters AS mtr").
-		// Select meter master data
 		Column("mtr.meter_number").
 		Column("mtr.meter_type").
 		Column("mtr.region").
@@ -1804,48 +1803,52 @@ func (s *MeterService) GetMeterStatus(ctx context.Context, params models.Reading
 		Column("mtr.station").
 		Column("mtr.feeder_panel_name").
 		Column("mtr.location").
-
-		// Daily consumption fields
 		Column("mcd.consumption_date").
 		Column("mcd.consumption").
 		Column("mcd.reading_count").
 		Column("mcd.day_start_time").
 		Column("mcd.day_end_time").
-
-		// Computed status
 		ColumnExpr(`
-            CASE
-                WHEN mcd.meter_number IS NULL THEN 'OFFLINE - No Record'
-                WHEN mcd.data_item_id = 'NO_DATA' THEN 'OFFLINE - No Data'
-                ELSE 'ONLINE'
-            END AS status`).
-
-		// Join by meter_number + date range
+	CASE
+	WHEN mcd.meter_number IS NULL THEN 'OFFLINE - No Record'
+	WHEN mcd.data_item_id = 'NO_DATA' THEN 'OFFLINE - No Data'
+	ELSE 'ONLINE'
+	END AS status`).
 		Join(`
-            LEFT JOIN app.meter_consumption_daily AS mcd
-            ON mtr.meter_number = mcd.meter_number
-            AND mcd.consumption_date BETWEEN ? AND ?
-        `, params.DateFrom, params.DateTo)
+	LEFT JOIN app.meter_consumption_daily AS mcd
+	ON mtr.meter_number = mcd.meter_number
+	AND mcd.consumption_date BETWEEN ? AND ?
+	`, params.DateFrom, params.DateTo)
 
-	// Optional filtering
-	if len(params.MeterNumber) > 0 {
-		q = q.Where("mtr.meter_number IN (?)", bun.In(params.MeterNumber))
+	// ----------------------------------------------------
+	// Apply universal filters (same as other functions)
+	// ----------------------------------------------------
+	filters := buildReadingFilters(params)
+
+	for _, f := range filters {
+		// Skip date filter: JOIN already applied it
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	if len(params.Regions) > 0 {
-		q = q.Where("mtr.region IN (?)", bun.In(params.Regions))
-	}
+	// Sorting
+	q = q.OrderExpr(`
+	CASE
+	WHEN mcd.meter_number IS NULL THEN 1
+	WHEN mcd.data_item_id = 'NO_DATA' THEN 2
+	ELSE 3
+	END ASC,
+		mtr.meter_number ASC
+	`)
 
-	if len(params.Districts) > 0 {
-		q = q.Where("mtr.district IN (?)", bun.In(params.Districts))
-	}
-
-	// Execute
 	if err := q.Scan(ctx, &results); err != nil {
 		return nil, err
 	}
 
 	return results, nil
+
 }
 
 func (s *MeterService) GetMeterStatusCounts(

@@ -46,6 +46,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 	meterSvc := services.NewMeterService(db)
 	feedbackSvc := services.NewFeedbackService(db)
 	meterMetricsSvc := services.NewMeterMetricsService(db)
+	serviceAreaSvc := services.NewServiceAreaService(db) // ✅ NEW
 
 	// create the auth middleware instance (pass dependencies)
 	authMW := mdlwr.NewAuthMiddleware(cfg.JWTPublicKeyPath, authSvc, logr.Logger)
@@ -54,6 +55,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 	meterHandler := handlers.NewMeterHandler(meterSvc, logr.Logger)
 	feedbackHandler := handlers.NewFeedbackHandler(feedbackSvc, logr.Logger)
 	meterMetricsHandler := handlers.NewMeterMetricsHandler(meterMetricsSvc, logr.Logger)
+	serviceAreaHandler := handlers.NewServiceAreaHandler(serviceAreaSvc, logr.Logger) // ✅ NEW
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -81,47 +83,59 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 
 		r.Route("/meters", func(r chi.Router) {
 			//r.Use(authMW.JWTAuth) // protect with JWT
-			r.Get("/", meterHandler.QueryMeters)
-			r.Get("/status", meterHandler.GetMeterStatus)
-			r.Get("/status/counts", meterHandler.GetMeterStatusCounts)
 
+			// Basic meter operations
+			r.Get("/", meterHandler.QueryMeters)
 			r.Get("/{id}", meterHandler.GetMeterByID)
 
+			// ✅ STATUS ENDPOINTS - NEW OPTIMIZED STRUCTURE
+			r.Route("/status", func(r chi.Router) {
+				// NEW - Phase 1 (Critical)
+				r.Get("/summary", meterHandler.GetMeterStatusSummary)   // < 1 KB
+				r.Get("/timeline", meterHandler.GetMeterStatusTimeline) // < 50 KB
+				r.Get("/details", meterHandler.GetMeterStatusDetails)   // 25 KB per page
+
+				// Keep existing for backward compatibility
+				r.Get("/", meterHandler.GetMeterStatus)             // DEPRECATED
+				r.Get("/counts", meterHandler.GetMeterStatusCounts) // DEPRECATED
+			})
+
+			// ✅ HEALTH ENDPOINT - NEW (Phase 2, Optional)
+			r.Route("/health", func(r chi.Router) {
+				r.Get("/metrics", meterHandler.GetMeterHealthMetrics)
+			})
+
+			// Keep existing readings routes unchanged
 			r.Route("/readings", func(r chi.Router) {
-				//r.Get("/", meterHandler.GetReadings)
 				r.Get("/metrics", meterMetricsHandler.GetMeterMetrics)
 				r.Get("/aggregated", meterHandler.GetAggregatedReadings)
 				r.Get("/consumption", meterHandler.GetDailyConsumption)
-
 			})
 
+			// ✅ CONSUMPTION ENDPOINTS - ENHANCED
 			r.Route("/consumption", func(r chi.Router) {
+				// NEW - Phase 2
+				r.Get("/by-region", meterHandler.GetConsumptionByRegion) // Regional supply patterns
+
+				// Keep ALL existing routes unchanged
 				r.Get("/daily", meterHandler.GetDailyConsumption)
 				r.Get("/aggregate", meterHandler.GetAggregatedConsumption)
 
 				r.Get("/daily/regional", meterHandler.GetRegionalBoundaryDailyConsumption)
 				r.Get("/aggregate/regional", meterHandler.GetRegionalBoundaryAggregatedConsumption)
-
 				r.Get("/daily/district", meterHandler.GetDistrictBoundaryDailyConsumption)
 				r.Get("/aggregate/district", meterHandler.GetDistrictBoundaryAggregatedConsumption)
-
 				r.Get("/daily/bsp", meterHandler.GetBSPDailyConsumption)
 				r.Get("/aggregate/bsp", meterHandler.GetBSPAggregatedConsumption)
-
 				r.Get("/daily/pss", meterHandler.GetPSSDailyConsumption)
 				r.Get("/aggregate/pss", meterHandler.GetPSSAggregatedConsumption)
-
 				r.Get("/daily/ss", meterHandler.GetSSDailyConsumption)
 				r.Get("/aggregate/ss", meterHandler.GetSSAggregatedConsumption)
-
 				r.Get("/daily/feeder-trafo", meterHandler.GetFeederDailyConsumption)
 				r.Get("/aggregate/feeder-trafo", meterHandler.GetFeederAggregatedConsumption)
-
 				r.Get("/daily/dtx", meterHandler.GetDTXDailyConsumption)
 				r.Get("/aggregate/dtx", meterHandler.GetDTXAggregatedConsumption)
-
 			})
-
 		})
 
 		r.Route("/feedback", func(r chi.Router) {
@@ -133,6 +147,15 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 			// Get all feedback (paginated)
 			r.Get("/feedback/{id}", feedbackHandler.GetFeedbackByID)               // Get single feedback with replies
 			r.Patch("/feedback/{id}/status", feedbackHandler.UpdateFeedbackStatus) // Update status
+		})
+
+		// ✅ NEW: Service Areas routes
+		r.Route("/service-areas", func(r chi.Router) {
+			//r.Use(authMW.JWTAuth) // Protect with JWT if needed
+			r.Get("/", serviceAreaHandler.GetServiceAreas)            // Get all service areas
+			r.Get("/{id}", serviceAreaHandler.GetServiceAreaByID)     // Get single service area
+			r.Get("/meta/regions", serviceAreaHandler.GetRegions)     // Get unique regions
+			r.Get("/meta/districts", serviceAreaHandler.GetDistricts) // Get unique districts
 		})
 
 	})

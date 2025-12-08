@@ -201,3 +201,122 @@ type MeterStatusResult struct {
 	DayEndTime            *time.Time `bun:"day_end_time" json:"day_end_time"`
 	LastDayEndTime        *time.Time `bun:"last_day_end_time" json:"last_day_end_time,omitempty"`
 }
+
+// Add these to models/meter.go
+
+// MeterStatusSummary represents aggregated status counts and metrics
+type MeterStatusSummary struct {
+	Total               int                    `json:"total"`
+	Online              int                    `json:"online"`
+	OfflineNoData       int                    `json:"offline_no_data"`
+	OfflineNoRecord     int                    `json:"offline_no_record"`
+	TotalOffline        int                    `json:"total_offline"`
+	OnlinePercentage    float64                `json:"online_percentage"`
+	OfflinePercentage   float64                `json:"offline_percentage"`
+	AvgUptimePercentage float64                `json:"avg_uptime_percentage"`
+	TotalConsumptionKWh float64                `json:"total_consumption_kwh"`
+	FiltersApplied      map[string]interface{} `json:"filters_applied"`
+}
+
+// MeterStatusTimelineEntry represents daily status counts
+type MeterStatusTimelineEntry struct {
+	Date    time.Time `bun:"date" json:"date"`
+	Online  int       `bun:"online" json:"online"`
+	Offline int       `bun:"offline" json:"offline"`
+	Total   int       `bun:"total" json:"total"`
+}
+
+// MeterStatusTimeline represents the timeline response
+type MeterStatusTimeline struct {
+	Data      []MeterStatusTimelineEntry `json:"data"`
+	DateRange struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	} `json:"date_range"`
+}
+
+// MeterStatusDetailRecord represents a single meter's aggregated status over a date range
+type MeterStatusDetailRecord struct {
+	MeterNumber         string     `bun:"meter_number" json:"meter_number"`
+	MeterType           *string    `bun:"meter_type" json:"meter_type"`
+	Region              string     `bun:"region" json:"region,omitempty"`
+	District            string     `bun:"district" json:"district,omitempty"`
+	Station             *string    `bun:"station" json:"station,omitempty"`
+	FeederPanelName     *string    `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
+	Location            string     `bun:"location" json:"location,omitempty"`
+	BoundaryPoint       *string    `bun:"boundary_metering_point" json:"boundary_metering_point,omitempty"`
+	Status              string     `bun:"status" json:"status,omitempty"`
+	LastConsumptionDate *time.Time `bun:"last_consumption_date" json:"last_consumption_date"`
+	TotalConsumptionKWh float64    `bun:"total_consumption_kwh" json:"total_consumption_kwh"`
+	UptimePercentage    float64    `bun:"uptime_percentage" json:"uptime_percentage"`
+	DaysOffline         int        `bun:"days_offline" json:"days_offline"`
+	LastReadingTime     *time.Time `bun:"last_reading_time" json:"last_reading_time"`
+}
+
+// MeterStatusDetailResponse represents paginated detail response
+type MeterStatusDetailResponse struct {
+	Data       []MeterStatusDetailRecord `json:"data"`
+	Pagination struct {
+		Page         int  `json:"page"`
+		Limit        int  `json:"limit"`
+		TotalRecords int  `json:"total_records"`
+		TotalPages   int  `json:"total_pages"`
+		HasMore      bool `json:"has_more"`
+	} `json:"pagination"`
+	FiltersApplied map[string]interface{} `json:"filters_applied"`
+}
+
+// ConsumptionByRegionEntry represents consumption aggregated by region for a date
+type ConsumptionByRegionEntry struct {
+	Date                   time.Time `bun:"date" json:"date"`
+	Region                 string    `bun:"region" json:"region"`
+	TotalConsumptionKWh    float64   `bun:"total_consumption_kwh" json:"total_consumption_kwh"`
+	MeterCount             int       `bun:"meter_count" json:"meter_count"`
+	AvgConsumptionPerMeter float64   `bun:"avg_consumption_per_meter" json:"avg_consumption_per_meter"`
+}
+
+// ConsumptionByRegionResponse represents the by-region response
+type ConsumptionByRegionResponse struct {
+	Data    []ConsumptionByRegionEntry `json:"data"`
+	Summary struct {
+		TotalConsumptionKWh float64 `json:"total_consumption_kwh"`
+		UniqueRegions       int     `json:"unique_regions"`
+		DateRange           struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		} `json:"date_range"`
+	} `json:"summary"`
+}
+
+// MeterHealthMetrics represents health breakdown
+type MeterHealthMetrics struct {
+	TotalMeters            int                 `json:"total_meters"`
+	HealthyMeters          int                 `json:"healthy_meters"`
+	WarningMeters          int                 `json:"warning_meters"`
+	CriticalMeters         int                 `json:"critical_meters"`
+	HealthPercentage       float64             `json:"health_percentage"`
+	AvgUptime              float64             `json:"avg_uptime"`
+	MetersWithNoData7Days  int                 `json:"meters_with_no_data_7days"`
+	MetersWithNoData30Days int                 `json:"meters_with_no_data_30days"`
+	BreakdownByType        []MeterHealthByType `json:"breakdown_by_type"`
+}
+
+// MeterHealthByType represents health metrics per meter type
+type MeterHealthByType struct {
+	MeterType string `bun:"meter_type" json:"meter_type"`
+	Total     int    `bun:"total" json:"total"`
+	Healthy   int    `bun:"healthy" json:"healthy"`
+	Warning   int    `bun:"warning" json:"warning"`
+	Critical  int    `bun:"critical" json:"critical"`
+}
+
+// StatusDetailQueryParams for paginated details
+type StatusDetailQueryParams struct {
+	ReadingFilterParams // Embed existing filter params
+	Page                int
+	Limit               int
+	Search              string
+	Status              string
+	SortBy              string
+	SortOrder           string
+}

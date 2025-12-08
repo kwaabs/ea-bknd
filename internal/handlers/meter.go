@@ -1078,6 +1078,436 @@ func (h *MeterHandler) GetDistrictBoundaryAggregatedConsumption(w http.ResponseW
 	writeJSON(w, http.StatusOK, results)
 }
 
+// GetMeterStatusSummary returns aggregated status counts and metrics for summary cards
+func (h *MeterHandler) GetMeterStatusSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Build filter params
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            splitCSV(q.Get("meterType")),
+		Voltages:              splitCSV(q.Get("voltage_kv")),
+	}
+
+	// Call service
+	summary, err := h.service.GetMeterStatusSummary(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get meter status summary", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve status summary",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, summary)
+}
+
+// GetMeterStatusTimeline returns daily online/offline counts for timeline charts
+func (h *MeterHandler) GetMeterStatusTimeline(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Build filter params
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            splitCSV(q.Get("meterType")),
+		Voltages:              splitCSV(q.Get("voltage_kv")),
+	}
+
+	// Call service
+	timeline, err := h.service.GetMeterStatusTimeline(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get meter status timeline", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve status timeline",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, timeline)
+}
+
+// GetMeterStatusDetails returns paginated meter status details with sorting and filtering
+func (h *MeterHandler) GetMeterStatusDetails(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Parse pagination parameters
+	page := 1
+	if pageStr := q.Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	limit := 50
+	if limitStr := q.Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 200 {
+			limit = l
+		}
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Parse sorting parameters
+	sortBy := q.Get("sortBy")
+	sortOrder := strings.ToLower(q.Get("sortOrder")) // ✅ Also make sortOrder case-insensitive
+	if sortOrder == "" {
+		sortOrder = "desc"
+	}
+
+	// Validate sortBy
+	validSortFields := map[string]bool{
+		"meter_number": true,
+		"uptime":       true,
+		"consumption":  true,
+		"":             true, // default
+	}
+	if !validSortFields[sortBy] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid sortBy parameter, must be one of: meter_number, uptime, consumption",
+		})
+		return
+	}
+
+	// Validate sortOrder
+	if sortOrder != "asc" && sortOrder != "desc" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid sortOrder parameter, must be 'asc' or 'desc'",
+		})
+		return
+	}
+
+	// ✅ Parse status filter (case-insensitive)
+	status := strings.ToUpper(strings.TrimSpace(q.Get("status")))
+	if status != "" && status != "ONLINE" && status != "OFFLINE" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid status parameter, must be 'ONLINE' or 'OFFLINE' (case-insensitive)",
+		})
+		return
+	}
+
+	// Build filter params
+	params := models.StatusDetailQueryParams{
+		ReadingFilterParams: models.ReadingFilterParams{
+			DateFrom:              dateFrom,
+			DateTo:                dateTo,
+			MeterNumber:           splitCSV(q.Get("meterNumber")),
+			Regions:               splitCSV(q.Get("region")),
+			Districts:             splitCSV(q.Get("district")),
+			Stations:              splitCSV(q.Get("station")),
+			Locations:             splitCSV(q.Get("location")),
+			BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+			MeterTypes:            splitCSV(q.Get("meterType")),
+			Voltages:              splitCSV(q.Get("voltage_kv")),
+		},
+		Page:      page,
+		Limit:     limit,
+		Search:    q.Get("search"),
+		Status:    status, // ✅ Now uppercase
+		SortBy:    sortBy,
+		SortOrder: sortOrder,
+	}
+
+	// Call service
+	details, err := h.service.GetMeterStatusDetails(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get meter status details", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve status details",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, details)
+}
+
+// GetConsumptionByRegion returns consumption aggregated by region over time
+func (h *MeterHandler) GetConsumptionByRegion(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Parse and validate groupBy parameter
+	groupBy := q.Get("groupBy")
+	if groupBy == "" {
+		groupBy = "day"
+	}
+
+	validGroupBy := map[string]bool{
+		"day":   true,
+		"week":  true,
+		"month": true,
+		"year":  true,
+	}
+	if !validGroupBy[groupBy] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid groupBy parameter, must be one of: day, week, month, year",
+		})
+		return
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Build filter params
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            splitCSV(q.Get("meterType")),
+		Voltages:              splitCSV(q.Get("voltage_kv")),
+	}
+
+	// Call service
+	consumption, err := h.service.GetConsumptionByRegion(ctx, params, groupBy)
+	if err != nil {
+		h.logr.Error("failed to get consumption by region", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve consumption data",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, consumption)
+}
+
+// GetMeterHealthMetrics returns health breakdown and metrics
+func (h *MeterHandler) GetMeterHealthMetrics(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Build filter params
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            splitCSV(q.Get("meterType")),
+		Voltages:              splitCSV(q.Get("voltage_kv")),
+	}
+
+	// Call service
+	health, err := h.service.GetMeterHealthMetrics(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get meter health metrics", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve health metrics",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, health)
+}
+
 // --- helper functions ---
 
 func splitCSV(input string) []string {

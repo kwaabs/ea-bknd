@@ -1795,7 +1795,6 @@ func (s *MeterService) GetMeterStatus(ctx context.Context, params models.Reading
 
 	q := s.db.NewSelect().
 		TableExpr("app.meters AS mtr").
-		// Select meter master data
 		Column("mtr.meter_number").
 		Column("mtr.meter_type").
 		Column("mtr.region").
@@ -1804,48 +1803,52 @@ func (s *MeterService) GetMeterStatus(ctx context.Context, params models.Reading
 		Column("mtr.station").
 		Column("mtr.feeder_panel_name").
 		Column("mtr.location").
-
-		// Daily consumption fields
 		Column("mcd.consumption_date").
 		Column("mcd.consumption").
 		Column("mcd.reading_count").
 		Column("mcd.day_start_time").
 		Column("mcd.day_end_time").
-
-		// Computed status
 		ColumnExpr(`
-            CASE
-                WHEN mcd.meter_number IS NULL THEN 'OFFLINE - No Record'
-                WHEN mcd.data_item_id = 'NO_DATA' THEN 'OFFLINE - No Data'
-                ELSE 'ONLINE'
-            END AS status`).
-
-		// Join by meter_number + date range
+	CASE
+	WHEN mcd.meter_number IS NULL THEN 'OFFLINE - No Record'
+	WHEN mcd.data_item_id = 'NO_DATA' THEN 'OFFLINE - No Data'
+	ELSE 'ONLINE'
+	END AS status`).
 		Join(`
-            LEFT JOIN app.meter_consumption_daily AS mcd
-            ON mtr.meter_number = mcd.meter_number
-            AND mcd.consumption_date BETWEEN ? AND ?
-        `, params.DateFrom, params.DateTo)
+	LEFT JOIN app.meter_consumption_daily AS mcd
+	ON mtr.meter_number = mcd.meter_number
+	AND mcd.consumption_date BETWEEN ? AND ?
+	`, params.DateFrom, params.DateTo)
 
-	// Optional filtering
-	if len(params.MeterNumber) > 0 {
-		q = q.Where("mtr.meter_number IN (?)", bun.In(params.MeterNumber))
+	// ----------------------------------------------------
+	// Apply universal filters (same as other functions)
+	// ----------------------------------------------------
+	filters := buildReadingFilters(params)
+
+	for _, f := range filters {
+		// Skip date filter: JOIN already applied it
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	if len(params.Regions) > 0 {
-		q = q.Where("mtr.region IN (?)", bun.In(params.Regions))
-	}
+	// Sorting
+	q = q.OrderExpr(`
+	CASE
+	WHEN mcd.meter_number IS NULL THEN 1
+	WHEN mcd.data_item_id = 'NO_DATA' THEN 2
+	ELSE 3
+	END ASC,
+		mtr.meter_number ASC
+	`)
 
-	if len(params.Districts) > 0 {
-		q = q.Where("mtr.district IN (?)", bun.In(params.Districts))
-	}
-
-	// Execute
 	if err := q.Scan(ctx, &results); err != nil {
 		return nil, err
 	}
 
 	return results, nil
+
 }
 
 func (s *MeterService) GetMeterStatusCounts(
@@ -1912,6 +1915,927 @@ func (s *MeterService) GetMeterStatusCounts(
 	counts["total"] = row.Online + row.OfflineNoRecord + row.OfflineNoData
 
 	return counts, nil
+}
+
+// GetMeterStatusSummary returns aggregated status counts and metrics
+// CORRECTED: Fixed uptime calculation to use total days in range
+//func (s *MeterService) GetMeterStatusSummary(
+//	ctx context.Context,
+//	params models.ReadingFilterParams,
+//) (*models.MeterStatusSummary, error) {
+//
+//	// ✅ Calculate days in range for accurate uptime percentage
+//	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
+//
+//	filters := buildReadingFilters(params)
+//
+//	// Build the query
+//	q := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr").
+//		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
+//		ColumnExpr(`
+//			COUNT(DISTINCT CASE
+//				WHEN mcd.has_actual_data = true THEN mtr.meter_number
+//			END) as online_meters
+//		`).
+//		ColumnExpr(`
+//			COUNT(DISTINCT CASE
+//				WHEN mcd.has_actual_data = false THEN mtr.meter_number
+//			END) as offline_no_data_meters
+//		`).
+//		ColumnExpr(`
+//			COUNT(DISTINCT CASE
+//				WHEN mcd.meter_number IS NULL THEN mtr.meter_number
+//			END) as offline_no_record_meters
+//		`).
+//		ColumnExpr(`
+//			COALESCE(SUM(mcd.total_consumption), 0) as total_consumption
+//		`).
+//		ColumnExpr(`
+//			COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime
+//		`).
+//		Join(`
+//			LEFT JOIN (
+//				SELECT
+//					meter_number,
+//					MAX(consumption_date) as last_consumption_date,
+//					BOOL_OR(data_item_id != 'NO_DATA' AND data_item_id = '00100000') as has_actual_data,
+//					SUM(consumption) as total_consumption,
+//					(COUNT(DISTINCT CASE WHEN data_item_id = '00100000' THEN DATE(consumption_date) END) * 100.0 /
+//					 ?) as uptime_percentage
+//				FROM app.meter_consumption_daily
+//				WHERE consumption_date BETWEEN ? AND ?
+//				GROUP BY meter_number
+//			) AS mcd ON mtr.meter_number = mcd.meter_number
+//		`, daysInRange, params.DateFrom, params.DateTo) // ✅ FIX: Pass daysInRange
+//
+//	// Apply filters (skip date filters since they're in the subquery)
+//	for _, f := range filters {
+//		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+//			continue
+//		}
+//		q = q.Where(f.Query, f.Args...)
+//	}
+//
+//	// Result struct for raw query
+//	var result struct {
+//		TotalMeters           int     `bun:"total_meters"`
+//		OnlineMeters          int     `bun:"online_meters"`
+//		OfflineNoDataMeters   int     `bun:"offline_no_data_meters"`
+//		OfflineNoRecordMeters int     `bun:"offline_no_record_meters"`
+//		TotalConsumption      float64 `bun:"total_consumption"`
+//		AvgUptime             float64 `bun:"avg_uptime"`
+//	}
+//
+//	if err := q.Scan(ctx, &result); err != nil {
+//		return nil, err
+//	}
+//
+//	// Calculate derived values
+//	totalOffline := result.OfflineNoDataMeters + result.OfflineNoRecordMeters
+//	onlinePercentage := 0.0
+//	offlinePercentage := 0.0
+//
+//	if result.TotalMeters > 0 {
+//		onlinePercentage = float64(result.OnlineMeters) * 100.0 / float64(result.TotalMeters)
+//		offlinePercentage = float64(totalOffline) * 100.0 / float64(result.TotalMeters)
+//	}
+//
+//	// Build filters applied map
+//	filtersApplied := map[string]interface{}{
+//		"dateFrom": params.DateFrom.Format("2006-01-02"),
+//		"dateTo":   params.DateTo.Format("2006-01-02"),
+//	}
+//	if len(params.Regions) > 0 {
+//		filtersApplied["region"] = params.Regions
+//	}
+//	if len(params.Districts) > 0 {
+//		filtersApplied["district"] = params.Districts
+//	}
+//	if len(params.Stations) > 0 {
+//		filtersApplied["station"] = params.Stations
+//	}
+//	if len(params.MeterTypes) > 0 {
+//		filtersApplied["meterType"] = params.MeterTypes
+//	}
+//
+//	return &models.MeterStatusSummary{
+//		Total:               result.TotalMeters,
+//		Online:              result.OnlineMeters,
+//		OfflineNoData:       result.OfflineNoDataMeters,
+//		OfflineNoRecord:     result.OfflineNoRecordMeters,
+//		TotalOffline:        totalOffline,
+//		OnlinePercentage:    onlinePercentage,
+//		OfflinePercentage:   offlinePercentage,
+//		AvgUptimePercentage: result.AvgUptime,
+//		TotalConsumptionKWh: result.TotalConsumption,
+//		FiltersApplied:      filtersApplied,
+//	}, nil
+//}
+
+// GetMeterStatusSummary returns aggregated status counts and metrics
+func (s *MeterService) GetMeterStatusSummary(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) (*models.MeterStatusSummary, error) {
+
+	// Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
+
+	filters := buildReadingFilters(params)
+
+	// Build the query
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.has_actual_data = true THEN mtr.meter_number 
+			END) as online_meters
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.has_actual_data = false THEN mtr.meter_number 
+			END) as offline_no_data_meters
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.meter_number IS NULL THEN mtr.meter_number 
+			END) as offline_no_record_meters
+		`).
+		ColumnExpr(`
+			COALESCE(SUM(mcd.total_consumption), 0) as total_consumption
+		`).
+		ColumnExpr(`
+			COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime
+		`).
+		Join(`
+			LEFT JOIN (
+				SELECT 
+					meter_number,
+					MAX(consumption_date) as last_consumption_date,
+					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
+					SUM(consumption) as total_consumption,
+					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 / 
+					 ?) as uptime_percentage
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, params.DateFrom, params.DateTo)
+
+	// Apply filters (skip date filters since they're in the subquery)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// Result struct for raw query
+	var result struct {
+		TotalMeters           int     `bun:"total_meters"`
+		OnlineMeters          int     `bun:"online_meters"`
+		OfflineNoDataMeters   int     `bun:"offline_no_data_meters"`
+		OfflineNoRecordMeters int     `bun:"offline_no_record_meters"`
+		TotalConsumption      float64 `bun:"total_consumption"`
+		AvgUptime             float64 `bun:"avg_uptime"`
+	}
+
+	if err := q.Scan(ctx, &result); err != nil {
+		return nil, err
+	}
+
+	// Calculate derived values
+	totalOffline := result.OfflineNoDataMeters + result.OfflineNoRecordMeters
+	onlinePercentage := 0.0
+	offlinePercentage := 0.0
+
+	if result.TotalMeters > 0 {
+		onlinePercentage = float64(result.OnlineMeters) * 100.0 / float64(result.TotalMeters)
+		offlinePercentage = float64(totalOffline) * 100.0 / float64(result.TotalMeters)
+	}
+
+	// Build filters applied map
+	filtersApplied := map[string]interface{}{
+		"dateFrom": params.DateFrom.Format("2006-01-02"),
+		"dateTo":   params.DateTo.Format("2006-01-02"),
+	}
+	if len(params.Regions) > 0 {
+		filtersApplied["region"] = params.Regions
+	}
+	if len(params.Districts) > 0 {
+		filtersApplied["district"] = params.Districts
+	}
+	if len(params.Stations) > 0 {
+		filtersApplied["station"] = params.Stations
+	}
+	if len(params.MeterTypes) > 0 {
+		filtersApplied["meterType"] = params.MeterTypes
+	}
+
+	return &models.MeterStatusSummary{
+		Total:               result.TotalMeters,
+		Online:              result.OnlineMeters,
+		OfflineNoData:       result.OfflineNoDataMeters,
+		OfflineNoRecord:     result.OfflineNoRecordMeters,
+		TotalOffline:        totalOffline,
+		OnlinePercentage:    onlinePercentage,
+		OfflinePercentage:   offlinePercentage,
+		AvgUptimePercentage: result.AvgUptime,
+		TotalConsumptionKWh: result.TotalConsumption,
+		FiltersApplied:      filtersApplied,
+	}, nil
+}
+
+// GetMeterStatusTimeline returns daily online/offline counts for charts
+
+//func (s *MeterService) GetMeterStatusTimeline(
+//	ctx context.Context,
+//	params models.ReadingFilterParams,
+//) (*models.MeterStatusTimeline, error) {
+//
+//	filters := buildReadingFilters(params)
+//
+//	// Build subquery for meter list with filters
+//	meterSubquery := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr").
+//		Column("mtr.meter_number")
+//
+//	// Apply meter filters (skip date filters)
+//	for _, f := range filters {
+//		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+//			continue
+//		}
+//		// Replace mcd. with mtr. for meter filters
+//		qry := strings.ReplaceAll(f.Query, "mcd.", "mtr.")
+//		meterSubquery = meterSubquery.Where(qry, f.Args...)
+//	}
+//
+//	// ✅ FIX: Use a subquery that determines status per meter per day first
+//	var entries []models.MeterStatusTimelineEntry
+//
+//	err := s.db.NewSelect().
+//		ColumnExpr("date").
+//		ColumnExpr("COUNT(DISTINCT CASE WHEN is_online THEN meter_number END) as online").
+//		ColumnExpr("COUNT(DISTINCT CASE WHEN NOT is_online THEN meter_number END) as offline").
+//		ColumnExpr("COUNT(DISTINCT meter_number) as total").
+//		TableExpr(`(
+//			SELECT
+//				DATE(mcd.consumption_date) as date,
+//				mcd.meter_number,
+//				BOOL_OR(mcd.data_item_id = '00100000') as is_online
+//			FROM app.meter_consumption_daily AS mcd
+//			WHERE mcd.consumption_date BETWEEN ? AND ?
+//			  AND mcd.meter_number IN (?)
+//			GROUP BY DATE(mcd.consumption_date), mcd.meter_number
+//		) AS daily_status`, params.DateFrom, params.DateTo, meterSubquery).
+//		GroupExpr("date").
+//		OrderExpr("date ASC").
+//		Scan(ctx, &entries)
+//
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	timeline := &models.MeterStatusTimeline{
+//		Data: entries,
+//	}
+//	timeline.DateRange.From = params.DateFrom.Format("2006-01-02")
+//	timeline.DateRange.To = params.DateTo.Format("2006-01-02")
+//
+//	return timeline, nil
+//}
+
+// GetMeterStatusTimeline returns daily online/offline counts for charts
+func (s *MeterService) GetMeterStatusTimeline(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) (*models.MeterStatusTimeline, error) {
+
+	filters := buildReadingFilters(params)
+
+	// Build subquery for meter list with filters
+	meterSubquery := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_number")
+
+	// Apply meter filters (skip date filters)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		// Replace mcd. with mtr. for meter filters
+		qry := strings.ReplaceAll(f.Query, "mcd.", "mtr.")
+		meterSubquery = meterSubquery.Where(qry, f.Args...)
+	}
+
+	// Main query for timeline with corrected status logic
+	var entries []models.MeterStatusTimelineEntry
+
+	err := s.db.NewSelect().
+		ColumnExpr("date").
+		ColumnExpr("COUNT(DISTINCT CASE WHEN is_online THEN meter_number END) as online").
+		ColumnExpr("COUNT(DISTINCT CASE WHEN NOT is_online THEN meter_number END) as offline").
+		ColumnExpr("COUNT(DISTINCT meter_number) as total").
+		TableExpr(`(
+			SELECT 
+				DATE(mcd.consumption_date) as date,
+				mcd.meter_number,
+				BOOL_OR(mcd.data_item_id != 'NO_DATA') as is_online
+			FROM app.meter_consumption_daily AS mcd
+			WHERE mcd.consumption_date BETWEEN ? AND ?
+			  AND mcd.meter_number IN (?)
+			GROUP BY DATE(mcd.consumption_date), mcd.meter_number
+		) AS daily_status`, params.DateFrom, params.DateTo, meterSubquery).
+		Group("date").
+		Order("date ASC").
+		Scan(ctx, &entries)
+
+	if err != nil {
+		return nil, err
+	}
+
+	timeline := &models.MeterStatusTimeline{
+		Data: entries,
+	}
+	timeline.DateRange.From = params.DateFrom.Format("2006-01-02")
+	timeline.DateRange.To = params.DateTo.Format("2006-01-02")
+
+	return timeline, nil
+}
+
+// GetMeterStatusDetails returns paginated meter status details
+// CORRECTED: Fixed uptime calculation to use total days in range
+//func (s *MeterService) GetMeterStatusDetails(
+//	ctx context.Context,
+//	params models.StatusDetailQueryParams,
+//) (*models.MeterStatusDetailResponse, error) {
+//
+//	// Validate and set defaults
+//	if params.Page < 1 {
+//		params.Page = 1
+//	}
+//	if params.Limit <= 0 || params.Limit > 200 {
+//		params.Limit = 50
+//	}
+//	if params.SortOrder == "" {
+//		params.SortOrder = "desc"
+//	}
+//
+//	// ✅ Calculate days in range for accurate uptime percentage
+//	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
+//
+//	filters := buildReadingFilters(params.ReadingFilterParams)
+//
+//	// Build the aggregated meter summary CTE
+//	q := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr").
+//		Column("mtr.meter_number").
+//		Column("mtr.meter_type").
+//		Column("mtr.region").
+//		Column("mtr.district").
+//		Column("mtr.station").
+//		Column("mtr.feeder_panel_name").
+//		Column("mtr.location").
+//		Column("mtr.boundary_metering_point").
+//		ColumnExpr(`
+//			CASE
+//				WHEN COUNT(CASE WHEN mcd.data_item_id = '00100000' THEN 1 END) > 0 THEN 'ONLINE'
+//				WHEN COUNT(CASE WHEN mcd.data_item_id = 'NO_DATA' THEN 1 END) > 0 THEN 'OFFLINE - No Data'
+//				ELSE 'OFFLINE - No Record'
+//			END as status
+//		`).
+//		ColumnExpr("MAX(mcd.consumption_date) as last_consumption_date").
+//		ColumnExpr("COALESCE(SUM(mcd.consumption), 0) as total_consumption_kwh").
+//		ColumnExpr(`
+//			(COUNT(DISTINCT CASE WHEN mcd.data_item_id = '00100000' THEN DATE(mcd.consumption_date) END) * 100.0 /
+//			 ?) as uptime_percentage
+//		`, daysInRange). // ✅ FIX: Use total days in range, not days with data
+//		ColumnExpr(`
+//			(? - COUNT(DISTINCT CASE WHEN mcd.data_item_id = '00100000' THEN DATE(mcd.consumption_date) END)) as days_offline
+//		`, daysInRange). // ✅ FIX: Calculate offline days correctly
+//		ColumnExpr("MAX(mcd.day_end_time) as last_reading_time").
+//		Join(`
+//			LEFT JOIN app.meter_consumption_daily AS mcd
+//			ON mtr.meter_number = mcd.meter_number
+//			AND mcd.consumption_date BETWEEN ? AND ?
+//		`, params.DateFrom, params.DateTo)
+//
+//	// Apply meter filters (skip date filters)
+//	for _, f := range filters {
+//		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+//			continue
+//		}
+//		q = q.Where(f.Query, f.Args...)
+//	}
+//
+//	// Apply search filter
+//	if params.Search != "" {
+//		q = q.Where("mtr.meter_number ILIKE ?", "%"+params.Search+"%")
+//	}
+//
+//	// Group by meter
+//	q = q.Group("mtr.meter_number").
+//		Group("mtr.meter_type").
+//		Group("mtr.region").
+//		Group("mtr.district").
+//		Group("mtr.station").
+//		Group("mtr.feeder_panel_name").
+//		Group("mtr.location").
+//		Group("mtr.boundary_metering_point")
+//
+//	// Apply status filter after grouping (via HAVING)
+//	if params.Status != "" {
+//		if params.Status == "ONLINE" {
+//			q = q.Having("COUNT(CASE WHEN mcd.data_item_id = '00100000' THEN 1 END) > 0")
+//		} else if params.Status == "OFFLINE" {
+//			q = q.Having("COUNT(CASE WHEN mcd.data_item_id = '00100000' THEN 1 END) = 0")
+//		}
+//	}
+//
+//	// Count total before pagination
+//	totalCount, err := q.Count(ctx)
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	// Apply sorting
+//	sortOrder := "DESC"
+//	if strings.ToLower(params.SortOrder) == "asc" {
+//		sortOrder = "ASC"
+//	}
+//
+//	switch params.SortBy {
+//	case "uptime":
+//		q = q.OrderExpr("uptime_percentage " + sortOrder)
+//	case "consumption":
+//		q = q.OrderExpr("total_consumption_kwh " + sortOrder)
+//	case "meter_number":
+//		q = q.OrderExpr("mtr.meter_number " + sortOrder)
+//	default:
+//		q = q.OrderExpr("mtr.meter_number ASC")
+//	}
+//
+//	// Apply pagination
+//	offset := (params.Page - 1) * params.Limit
+//	q = q.Limit(params.Limit).Offset(offset)
+//
+//	// Execute query
+//	var records []models.MeterStatusDetailRecord
+//	if err := q.Scan(ctx, &records); err != nil {
+//		return nil, err
+//	}
+//
+//	// Build response
+//	totalPages := (totalCount + params.Limit - 1) / params.Limit
+//	hasMore := params.Page < totalPages
+//
+//	// Build filters applied map
+//	filtersApplied := map[string]interface{}{
+//		"dateFrom": params.DateFrom.Format("2006-01-02"),
+//		"dateTo":   params.DateTo.Format("2006-01-02"),
+//	}
+//	if len(params.Regions) > 0 {
+//		filtersApplied["region"] = params.Regions
+//	}
+//	if len(params.MeterTypes) > 0 {
+//		filtersApplied["meterType"] = params.MeterTypes
+//	}
+//	if params.Search != "" {
+//		filtersApplied["search"] = params.Search
+//	}
+//	if params.Status != "" {
+//		filtersApplied["status"] = params.Status
+//	}
+//	if params.SortBy != "" {
+//		filtersApplied["sortBy"] = params.SortBy
+//		filtersApplied["sortOrder"] = params.SortOrder
+//	}
+//
+//	response := &models.MeterStatusDetailResponse{
+//		Data:           records,
+//		FiltersApplied: filtersApplied,
+//	}
+//	response.Pagination.Page = params.Page
+//	response.Pagination.Limit = params.Limit
+//	response.Pagination.TotalRecords = totalCount
+//	response.Pagination.TotalPages = totalPages
+//	response.Pagination.HasMore = hasMore
+//
+//	return response, nil
+//}
+
+// GetMeterStatusDetails returns paginated meter status details
+func (s *MeterService) GetMeterStatusDetails(
+	ctx context.Context,
+	params models.StatusDetailQueryParams,
+) (*models.MeterStatusDetailResponse, error) {
+
+	// Validate and set defaults
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.Limit <= 0 || params.Limit > 200 {
+		params.Limit = 50
+	}
+	if params.SortOrder == "" {
+		params.SortOrder = "desc"
+	}
+
+	// Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
+
+	filters := buildReadingFilters(params.ReadingFilterParams)
+
+	// Fast count query - just count meters, not consumption data
+	countQuery := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Where("1=1")
+
+	// Apply meter filters only (no consumption join needed for count)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		countQuery = countQuery.Where(f.Query, f.Args...)
+	}
+
+	if params.Search != "" {
+		countQuery = countQuery.Where("mtr.meter_number ILIKE ?", "%"+params.Search+"%")
+	}
+
+	// Fast count without aggregating consumption
+	totalCount, err := countQuery.Count(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build the aggregated meter summary query
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_number").
+		Column("mtr.meter_type").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.location").
+		Column("mtr.boundary_metering_point").
+		ColumnExpr(`
+			CASE 
+				WHEN COUNT(CASE WHEN mcd.data_item_id != 'NO_DATA' THEN 1 END) > 0 THEN 'ONLINE'
+				WHEN COUNT(CASE WHEN mcd.data_item_id = 'NO_DATA' THEN 1 END) > 0 THEN 'OFFLINE - No Data'
+				ELSE 'OFFLINE - No Record'
+			END as status
+		`).
+		ColumnExpr("MAX(mcd.consumption_date) as last_consumption_date").
+		ColumnExpr("COALESCE(SUM(mcd.consumption), 0) as total_consumption_kwh").
+		ColumnExpr(`
+			(COUNT(DISTINCT CASE WHEN mcd.data_item_id != 'NO_DATA' THEN DATE(mcd.consumption_date) END) * 100.0 / 
+			 ?) as uptime_percentage
+		`, daysInRange).
+		ColumnExpr(`
+			(? - COUNT(DISTINCT CASE WHEN mcd.data_item_id != 'NO_DATA' THEN DATE(mcd.consumption_date) END)) as days_offline
+		`, daysInRange).
+		ColumnExpr("MAX(mcd.day_end_time) as last_reading_time").
+		Join(`
+			LEFT JOIN app.meter_consumption_daily AS mcd 
+			ON mtr.meter_number = mcd.meter_number 
+			AND mcd.consumption_date BETWEEN ? AND ?
+		`, params.DateFrom, params.DateTo)
+
+	// Apply meter filters (skip date filters)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// Apply search filter
+	if params.Search != "" {
+		q = q.Where("mtr.meter_number ILIKE ?", "%"+params.Search+"%")
+	}
+
+	// Group by meter
+	q = q.Group("mtr.meter_number").
+		Group("mtr.meter_type").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.station").
+		Group("mtr.feeder_panel_name").
+		Group("mtr.location").
+		Group("mtr.boundary_metering_point")
+
+	// Apply status filter after grouping (via HAVING)
+	if params.Status != "" {
+		if params.Status == "ONLINE" {
+			q = q.Having("COUNT(CASE WHEN mcd.data_item_id != 'NO_DATA' THEN 1 END) > 0")
+		} else if params.Status == "OFFLINE" {
+			q = q.Having("COUNT(CASE WHEN mcd.data_item_id != 'NO_DATA' THEN 1 END) = 0")
+		}
+	}
+
+	// Apply sorting
+	sortOrder := "DESC"
+	if strings.ToLower(params.SortOrder) == "asc" {
+		sortOrder = "ASC"
+	}
+
+	switch params.SortBy {
+	case "uptime":
+		q = q.OrderExpr("uptime_percentage " + sortOrder)
+	case "consumption":
+		q = q.OrderExpr("total_consumption_kwh " + sortOrder)
+	case "meter_number":
+		q = q.OrderExpr("mtr.meter_number " + sortOrder)
+	default:
+		q = q.OrderExpr("mtr.meter_number ASC")
+	}
+
+	// Apply pagination
+	offset := (params.Page - 1) * params.Limit
+	q = q.Limit(params.Limit).Offset(offset)
+
+	// Execute query
+	var records []models.MeterStatusDetailRecord
+	if err := q.Scan(ctx, &records); err != nil {
+		return nil, err
+	}
+
+	// Build response
+	totalPages := (totalCount + params.Limit - 1) / params.Limit
+	hasMore := params.Page < totalPages
+
+	// Build filters applied map
+	filtersApplied := map[string]interface{}{
+		"dateFrom": params.DateFrom.Format("2006-01-02"),
+		"dateTo":   params.DateTo.Format("2006-01-02"),
+	}
+	if len(params.Regions) > 0 {
+		filtersApplied["region"] = params.Regions
+	}
+	if len(params.MeterTypes) > 0 {
+		filtersApplied["meterType"] = params.MeterTypes
+	}
+	if params.Search != "" {
+		filtersApplied["search"] = params.Search
+	}
+	if params.Status != "" {
+		filtersApplied["status"] = params.Status
+	}
+	if params.SortBy != "" {
+		filtersApplied["sortBy"] = params.SortBy
+		filtersApplied["sortOrder"] = params.SortOrder
+	}
+
+	response := &models.MeterStatusDetailResponse{
+		Data:           records,
+		FiltersApplied: filtersApplied,
+	}
+	response.Pagination.Page = params.Page
+	response.Pagination.Limit = params.Limit
+	response.Pagination.TotalRecords = totalCount
+	response.Pagination.TotalPages = totalPages
+	response.Pagination.HasMore = hasMore
+
+	return response, nil
+}
+
+// GetConsumptionByRegion returns consumption aggregated by region over time
+// (No changes needed - this one was already correct)
+func (s *MeterService) GetConsumptionByRegion(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+) (*models.ConsumptionByRegionResponse, error) {
+
+	// Validate groupBy parameter
+	if groupBy == "" {
+		groupBy = "day"
+	}
+
+	filters := buildReadingFilters(params)
+
+	// Determine date grouping expression
+	var dateGroupExpr string
+	switch groupBy {
+	case "week":
+		dateGroupExpr = "DATE_TRUNC('week', mcd.consumption_date)"
+	case "month":
+		dateGroupExpr = "DATE_TRUNC('month', mcd.consumption_date)"
+	case "year":
+		dateGroupExpr = "DATE_TRUNC('year', mcd.consumption_date)"
+	default: // day
+		dateGroupExpr = "DATE(mcd.consumption_date)"
+	}
+
+	// Build the main query
+	q := s.db.NewSelect().
+		ColumnExpr(dateGroupExpr + " as date").
+		Column("mtr.region").
+		ColumnExpr("COALESCE(SUM(mcd.consumption), 0) as total_consumption_kwh").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) as meter_count").
+		ColumnExpr("COALESCE(AVG(mcd.consumption), 0) as avg_consumption_per_meter").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Where("mcd.consumption IS NOT NULL")
+
+	// Apply filters
+	for _, f := range filters {
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// Group by date and region
+	q = q.GroupExpr(dateGroupExpr).
+		Group("mtr.region").
+		OrderExpr("date ASC, mtr.region ASC")
+
+	// Execute query
+	var entries []models.ConsumptionByRegionEntry
+	if err := q.Scan(ctx, &entries); err != nil {
+		return nil, err
+	}
+
+	// Calculate summary statistics
+	var totalConsumption float64
+	regionsMap := make(map[string]bool)
+
+	for _, entry := range entries {
+		totalConsumption += entry.TotalConsumptionKWh
+		if entry.Region != "" {
+			regionsMap[entry.Region] = true
+		}
+	}
+
+	// Build response
+	response := &models.ConsumptionByRegionResponse{
+		Data: entries,
+	}
+	response.Summary.TotalConsumptionKWh = totalConsumption
+	response.Summary.UniqueRegions = len(regionsMap)
+	response.Summary.DateRange.From = params.DateFrom.Format("2006-01-02")
+	response.Summary.DateRange.To = params.DateTo.Format("2006-01-02")
+
+	return response, nil
+}
+
+// GetMeterHealthMetrics returns health breakdown and metrics
+
+func (s *MeterService) GetMeterHealthMetrics(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) (*models.MeterHealthMetrics, error) {
+
+	// ✅ Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
+
+	filters := buildReadingFilters(params)
+
+	// Define health thresholds
+	const (
+		healthyThreshold = 85.0 // >= 85% uptime = healthy
+		warningThreshold = 60.0 // 60-85% uptime = warning
+		// < 60% uptime = critical
+	)
+
+	// Calculate dates for "no data" checks
+	sevenDaysAgo := params.DateTo.AddDate(0, 0, -7)
+	thirtyDaysAgo := params.DateTo.AddDate(0, 0, -30)
+
+	// Main query for overall health metrics
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage >= ? THEN mtr.meter_number 
+			END) as healthy_meters
+		`, healthyThreshold).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage >= ? AND mcd.uptime_percentage < ? THEN mtr.meter_number 
+			END) as warning_meters
+		`, warningThreshold, healthyThreshold).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage < ? OR mcd.uptime_percentage IS NULL THEN mtr.meter_number 
+			END) as critical_meters
+		`, warningThreshold).
+		ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.last_consumption_date < ? THEN mtr.meter_number 
+			END) as no_data_7days
+		`, sevenDaysAgo).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.last_consumption_date < ? THEN mtr.meter_number 
+			END) as no_data_30days
+		`, thirtyDaysAgo).
+		Join(`
+			LEFT JOIN (
+				SELECT 
+					meter_number,
+					MAX(consumption_date) as last_consumption_date,
+					(COUNT(DISTINCT CASE WHEN data_item_id = '00100000' THEN DATE(consumption_date) END) * 100.0 / 
+					 ?) as uptime_percentage
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, params.DateFrom, params.DateTo) // ✅ FIX: Pass daysInRange
+
+	// Apply meter filters (skip date filters)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// Result struct for overall metrics
+	var overallResult struct {
+		TotalMeters    int     `bun:"total_meters"`
+		HealthyMeters  int     `bun:"healthy_meters"`
+		WarningMeters  int     `bun:"warning_meters"`
+		CriticalMeters int     `bun:"critical_meters"`
+		AvgUptime      float64 `bun:"avg_uptime"`
+		NoData7Days    int     `bun:"no_data_7days"`
+		NoData30Days   int     `bun:"no_data_30days"`
+	}
+
+	if err := q.Scan(ctx, &overallResult); err != nil {
+		return nil, err
+	}
+
+	// Query for breakdown by meter type
+	var breakdownByType []models.MeterHealthByType
+
+	qByType := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_type").
+		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage >= ? THEN mtr.meter_number 
+			END) as healthy
+		`, healthyThreshold).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage >= ? AND mcd.uptime_percentage < ? THEN mtr.meter_number 
+			END) as warning
+		`, warningThreshold, healthyThreshold).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage < ? OR mcd.uptime_percentage IS NULL THEN mtr.meter_number 
+			END) as critical
+		`, warningThreshold).
+		Join(`
+			LEFT JOIN (
+				SELECT 
+					meter_number,
+					(COUNT(DISTINCT CASE WHEN data_item_id = '00100000' THEN DATE(consumption_date) END) * 100.0 / 
+					 ?) as uptime_percentage
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, params.DateFrom, params.DateTo) // ✅ FIX: Pass daysInRange
+
+	// Apply same filters as overall query
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		qByType = qByType.Where(f.Query, f.Args...)
+	}
+
+	qByType = qByType.Group("mtr.meter_type").
+		Order("mtr.meter_type")
+
+	if err := qByType.Scan(ctx, &breakdownByType); err != nil {
+		return nil, err
+	}
+
+	// Calculate health percentage
+	healthPercentage := 0.0
+	if overallResult.TotalMeters > 0 {
+		healthPercentage = float64(overallResult.HealthyMeters) * 100.0 / float64(overallResult.TotalMeters)
+	}
+
+	return &models.MeterHealthMetrics{
+		TotalMeters:            overallResult.TotalMeters,
+		HealthyMeters:          overallResult.HealthyMeters,
+		WarningMeters:          overallResult.WarningMeters,
+		CriticalMeters:         overallResult.CriticalMeters,
+		HealthPercentage:       healthPercentage,
+		AvgUptime:              overallResult.AvgUptime,
+		MetersWithNoData7Days:  overallResult.NoData7Days,
+		MetersWithNoData30Days: overallResult.NoData30Days,
+		BreakdownByType:        breakdownByType,
+	}, nil
 }
 
 ///HELPER

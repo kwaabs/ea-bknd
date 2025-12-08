@@ -28,9 +28,9 @@ func main() {
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  2 * time.Minute, // ✅ 120 seconds
+		WriteTimeout: 2 * time.Minute, // ✅ 120 seconds
+		IdleTimeout:  2 * time.Minute, // ✅ 120 seconds
 	}
 
 	go func() {

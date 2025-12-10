@@ -2266,167 +2266,6 @@ func (s *MeterService) GetMeterStatusTimeline(
 }
 
 // GetMeterStatusDetails returns paginated meter status details
-// CORRECTED: Fixed uptime calculation to use total days in range
-//func (s *MeterService) GetMeterStatusDetails(
-//	ctx context.Context,
-//	params models.StatusDetailQueryParams,
-//) (*models.MeterStatusDetailResponse, error) {
-//
-//	// Validate and set defaults
-//	if params.Page < 1 {
-//		params.Page = 1
-//	}
-//	if params.Limit <= 0 || params.Limit > 200 {
-//		params.Limit = 50
-//	}
-//	if params.SortOrder == "" {
-//		params.SortOrder = "desc"
-//	}
-//
-//	// ✅ Calculate days in range for accurate uptime percentage
-//	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
-//
-//	filters := buildReadingFilters(params.ReadingFilterParams)
-//
-//	// Build the aggregated meter summary CTE
-//	q := s.db.NewSelect().
-//		TableExpr("app.meters AS mtr").
-//		Column("mtr.meter_number").
-//		Column("mtr.meter_type").
-//		Column("mtr.region").
-//		Column("mtr.district").
-//		Column("mtr.station").
-//		Column("mtr.feeder_panel_name").
-//		Column("mtr.location").
-//		Column("mtr.boundary_metering_point").
-//		ColumnExpr(`
-//			CASE
-//				WHEN COUNT(CASE WHEN mcd.data_item_id = '00100000' THEN 1 END) > 0 THEN 'ONLINE'
-//				WHEN COUNT(CASE WHEN mcd.data_item_id = 'NO_DATA' THEN 1 END) > 0 THEN 'OFFLINE - No Data'
-//				ELSE 'OFFLINE - No Record'
-//			END as status
-//		`).
-//		ColumnExpr("MAX(mcd.consumption_date) as last_consumption_date").
-//		ColumnExpr("COALESCE(SUM(mcd.consumption), 0) as total_consumption_kwh").
-//		ColumnExpr(`
-//			(COUNT(DISTINCT CASE WHEN mcd.data_item_id = '00100000' THEN DATE(mcd.consumption_date) END) * 100.0 /
-//			 ?) as uptime_percentage
-//		`, daysInRange). // ✅ FIX: Use total days in range, not days with data
-//		ColumnExpr(`
-//			(? - COUNT(DISTINCT CASE WHEN mcd.data_item_id = '00100000' THEN DATE(mcd.consumption_date) END)) as days_offline
-//		`, daysInRange). // ✅ FIX: Calculate offline days correctly
-//		ColumnExpr("MAX(mcd.day_end_time) as last_reading_time").
-//		Join(`
-//			LEFT JOIN app.meter_consumption_daily AS mcd
-//			ON mtr.meter_number = mcd.meter_number
-//			AND mcd.consumption_date BETWEEN ? AND ?
-//		`, params.DateFrom, params.DateTo)
-//
-//	// Apply meter filters (skip date filters)
-//	for _, f := range filters {
-//		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
-//			continue
-//		}
-//		q = q.Where(f.Query, f.Args...)
-//	}
-//
-//	// Apply search filter
-//	if params.Search != "" {
-//		q = q.Where("mtr.meter_number ILIKE ?", "%"+params.Search+"%")
-//	}
-//
-//	// Group by meter
-//	q = q.Group("mtr.meter_number").
-//		Group("mtr.meter_type").
-//		Group("mtr.region").
-//		Group("mtr.district").
-//		Group("mtr.station").
-//		Group("mtr.feeder_panel_name").
-//		Group("mtr.location").
-//		Group("mtr.boundary_metering_point")
-//
-//	// Apply status filter after grouping (via HAVING)
-//	if params.Status != "" {
-//		if params.Status == "ONLINE" {
-//			q = q.Having("COUNT(CASE WHEN mcd.data_item_id = '00100000' THEN 1 END) > 0")
-//		} else if params.Status == "OFFLINE" {
-//			q = q.Having("COUNT(CASE WHEN mcd.data_item_id = '00100000' THEN 1 END) = 0")
-//		}
-//	}
-//
-//	// Count total before pagination
-//	totalCount, err := q.Count(ctx)
-//	if err != nil {
-//		return nil, err
-//	}
-//
-//	// Apply sorting
-//	sortOrder := "DESC"
-//	if strings.ToLower(params.SortOrder) == "asc" {
-//		sortOrder = "ASC"
-//	}
-//
-//	switch params.SortBy {
-//	case "uptime":
-//		q = q.OrderExpr("uptime_percentage " + sortOrder)
-//	case "consumption":
-//		q = q.OrderExpr("total_consumption_kwh " + sortOrder)
-//	case "meter_number":
-//		q = q.OrderExpr("mtr.meter_number " + sortOrder)
-//	default:
-//		q = q.OrderExpr("mtr.meter_number ASC")
-//	}
-//
-//	// Apply pagination
-//	offset := (params.Page - 1) * params.Limit
-//	q = q.Limit(params.Limit).Offset(offset)
-//
-//	// Execute query
-//	var records []models.MeterStatusDetailRecord
-//	if err := q.Scan(ctx, &records); err != nil {
-//		return nil, err
-//	}
-//
-//	// Build response
-//	totalPages := (totalCount + params.Limit - 1) / params.Limit
-//	hasMore := params.Page < totalPages
-//
-//	// Build filters applied map
-//	filtersApplied := map[string]interface{}{
-//		"dateFrom": params.DateFrom.Format("2006-01-02"),
-//		"dateTo":   params.DateTo.Format("2006-01-02"),
-//	}
-//	if len(params.Regions) > 0 {
-//		filtersApplied["region"] = params.Regions
-//	}
-//	if len(params.MeterTypes) > 0 {
-//		filtersApplied["meterType"] = params.MeterTypes
-//	}
-//	if params.Search != "" {
-//		filtersApplied["search"] = params.Search
-//	}
-//	if params.Status != "" {
-//		filtersApplied["status"] = params.Status
-//	}
-//	if params.SortBy != "" {
-//		filtersApplied["sortBy"] = params.SortBy
-//		filtersApplied["sortOrder"] = params.SortOrder
-//	}
-//
-//	response := &models.MeterStatusDetailResponse{
-//		Data:           records,
-//		FiltersApplied: filtersApplied,
-//	}
-//	response.Pagination.Page = params.Page
-//	response.Pagination.Limit = params.Limit
-//	response.Pagination.TotalRecords = totalCount
-//	response.Pagination.TotalPages = totalPages
-//	response.Pagination.HasMore = hasMore
-//
-//	return response, nil
-//}
-
-// GetMeterStatusDetails returns paginated meter status details
 func (s *MeterService) GetMeterStatusDetails(
 	ctx context.Context,
 	params models.StatusDetailQueryParams,
@@ -2479,8 +2318,10 @@ func (s *MeterService) GetMeterStatusDetails(
 		Column("mtr.region").
 		Column("mtr.district").
 		Column("mtr.station").
+		Column("mtr.voltage_kv").
 		Column("mtr.feeder_panel_name").
 		Column("mtr.location").
+		Column("mtr.ic_og").
 		Column("mtr.boundary_metering_point").
 		ColumnExpr(`
 			CASE 
@@ -2526,6 +2367,8 @@ func (s *MeterService) GetMeterStatusDetails(
 		Group("mtr.station").
 		Group("mtr.feeder_panel_name").
 		Group("mtr.location").
+		Group("mtr.voltage_kv").
+		Group("mtr.ic_og").
 		Group("mtr.boundary_metering_point")
 
 	// Apply status filter after grouping (via HAVING)

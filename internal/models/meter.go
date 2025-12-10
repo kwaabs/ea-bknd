@@ -244,6 +244,8 @@ type MeterStatusDetailRecord struct {
 	Station             *string    `bun:"station" json:"station,omitempty"`
 	FeederPanelName     *string    `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
 	Location            string     `bun:"location" json:"location,omitempty"`
+	Voltage             string     `bun:"voltage_kv" json:"voltage_kv,omitempty"`
+	IC_OG               string     `bun:"ic_og" json:"ic_og,omitempty"`
 	BoundaryPoint       *string    `bun:"boundary_metering_point" json:"boundary_metering_point,omitempty"`
 	Status              string     `bun:"status" json:"status,omitempty"`
 	LastConsumptionDate *time.Time `bun:"last_consumption_date" json:"last_consumption_date"`

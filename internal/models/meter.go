@@ -322,3 +322,89 @@ type StatusDetailQueryParams struct {
 	SortBy              string
 	SortOrder           string
 }
+
+// MeterWithServiceArea represents a meter with its associated service area
+type MeterWithServiceArea struct {
+	// Meter fields
+	ID                    string     `bun:"id" json:"id"`
+	MeterNumber           string     `bun:"meter_number" json:"meter_number"`
+	MeterType             string     `bun:"meter_type" json:"meter_type"`
+	SPN                   *string    `bun:"spn" json:"spn,omitempty"`
+	MeterBrand            *string    `bun:"meter_brand" json:"meter_brand,omitempty"`
+	Location              *string    `bun:"location" json:"location,omitempty"`
+	DigitalAddress        *string    `bun:"digital_address" json:"digital_address,omitempty"`
+	Status                *string    `bun:"status" json:"status,omitempty"`
+	MeteringPoint         *string    `bun:"metering_point" json:"metering_point,omitempty"`
+	BoundaryMeteringPoint *string    `bun:"boundary_metering_point" json:"boundary_metering_point,omitempty"`
+	Incomer               *string    `bun:"incomer" json:"incomer,omitempty"`
+	Region                *string    `bun:"region" json:"region,omitempty"`
+	District              *string    `bun:"district" json:"district,omitempty"`
+	Station               *string    `bun:"station" json:"station,omitempty"`
+	CreatedAt             *time.Time `bun:"created_at" json:"created_at,omitempty"`
+	UpdatedAt             *time.Time `bun:"updated_at" json:"updated_at,omitempty"`
+	MultiplyFactor        *float64   `bun:"multiply_factor" json:"multiply_factor,omitempty"`
+	CTRatioPrimary        *float64   `bun:"ct_ratio_primary" json:"ct_ratio_primary,omitempty"`
+	CTRatioSecondary      *float64   `bun:"ct_ratio_secondary" json:"ct_ratio_secondary,omitempty"`
+	VTRatioPrimary        *float64   `bun:"vt_ratio_primary" json:"vt_ratio_primary,omitempty"`
+	VTRatioSecondary      *float64   `bun:"vt_ratio_secondary" json:"vt_ratio_secondary,omitempty"`
+	Latitude              *float64   `bun:"latitude" json:"latitude,omitempty"`
+	Longitude             *float64   `bun:"longitude" json:"longitude,omitempty"`
+	VoltageKV             *float64   `bun:"voltage_kv" json:"voltage_kv,omitempty"`
+	FeederPanelName       *string    `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
+	IC_OG                 *string    `bun:"ic_og" json:"ic_og,omitempty"`
+
+	// Service area fields (from dbo_ecg spatial join)
+	ServiceAreaDistrict *string `bun:"service_area_district" json:"service_area_district"`
+	ServiceAreaRegion   *string `bun:"service_area_region" json:"service_area_region"`
+}
+
+// MeterSpatialJoinParams for filtering spatial join results
+type MeterSpatialJoinParams struct {
+	Page              int
+	Limit             int
+	MeterTypes        []string
+	Regions           []string
+	Districts         []string
+	ServiceAreaRegion []string // Filter by service area region
+	HasCoordinates    *bool    // Filter meters with/without coordinates
+	Search            string
+	SortBy            string
+	SortOrder         string
+}
+
+// MeterSpatialCount represents aggregated counts by service area
+type MeterSpatialCount struct {
+	ServiceAreaRegion   *string `bun:"service_area_region" json:"service_area_region,omitempty"`
+	ServiceAreaDistrict *string `bun:"service_area_district" json:"service_area_district,omitempty"`
+	MeterType           *string `bun:"meter_type" json:"meter_type,omitempty"`
+	TotalMeters         int     `bun:"total_meters" json:"total_meters,omitempty"`
+	MetersWithCoords    int     `bun:"meters_with_coords" json:"meters_with_coords,omitempty"`
+	MetersInServiceArea int     `bun:"meters_in_service_area" json:"meters_in_service_area,omitempty"`
+	MetersMismatched    int     `bun:"meters_mismatched" json:"meters_mismatched,omitempty"`
+}
+
+// MeterSpatialCountParams for filtering counts
+type MeterSpatialCountParams struct {
+	GroupBy    string // "region", "district", "meter_type", or combinations
+	MeterTypes []string
+	Regions    []string
+	Districts  []string
+}
+
+// MeterSpatialCountResponse represents the aggregated response
+type MeterSpatialCountResponse struct {
+	Data    []MeterSpatialCount `json:"data"`
+	Summary struct {
+		TotalMeters        int     `json:"total_meters,omitempty"`
+		TotalRegions       int     `json:"total_regions,omitempty"`
+		TotalDistricts     int     `json:"total_districts,omitempty"`
+		AvgMetersPerRegion float64 `json:"avg_meters_per_region,omitempty"`
+		MismatchPercentage float64 `json:"mismatch_percentage,omitempty"`
+	} `json:"summary"`
+}
+
+// MeterWithServiceAreaResult represents the query result for spatial queries
+type MeterWithServiceAreaResult struct {
+	Data []MeterWithServiceArea `json:"data"`
+	Meta any                    `json:"meta"`
+}

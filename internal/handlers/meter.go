@@ -1508,6 +1508,241 @@ func (h *MeterHandler) GetMeterHealthMetrics(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, health)
 }
 
+// GetMetersWithServiceArea returns meters with spatial service area assignment
+func (h *MeterHandler) GetMetersWithServiceArea(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Parse pagination
+	page, _ := strconv.Atoi(q.Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+
+	// Helper to split CSV
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Parse hasCoordinates filter
+	var hasCoordinates *bool
+	if coordStr := q.Get("hasCoordinates"); coordStr != "" {
+		val := strings.ToLower(coordStr) == "true" || coordStr == "1"
+		hasCoordinates = &val
+	}
+
+	params := models.MeterSpatialJoinParams{
+		Page:              page,
+		Limit:             limit,
+		MeterTypes:        splitCSV(q.Get("meterType")),
+		Regions:           splitCSV(q.Get("region")),
+		Districts:         splitCSV(q.Get("district")),
+		ServiceAreaRegion: splitCSV(q.Get("serviceAreaRegion")),
+		HasCoordinates:    hasCoordinates,
+		Search:            q.Get("search"),
+		SortBy:            q.Get("sortBy"),
+		SortOrder:         q.Get("sortOrder"),
+	}
+
+	result, err := h.service.GetMetersWithServiceArea(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get meters with service area", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve meters",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GetMeterSpatialMismatch returns meters with region/district mismatches
+func (h *MeterHandler) GetMeterSpatialMismatch(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	page, _ := strconv.Atoi(q.Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	params := models.MeterSpatialJoinParams{
+		Page:       page,
+		Limit:      limit,
+		MeterTypes: splitCSV(q.Get("meterType")),
+		Search:     q.Get("search"),
+	}
+
+	result, err := h.service.GetMeterSpatialMismatch(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get meter spatial mismatches", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve mismatches",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GetMeterSpatialStats returns spatial assignment statistics
+func (h *MeterHandler) GetMeterSpatialStats(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	stats, err := h.service.GetMeterSpatialStats(ctx)
+	if err != nil {
+		h.logr.Error("failed to get meter spatial stats", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve statistics",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// GetMeterSpatialCounts returns aggregated meter counts by service area
+func (h *MeterHandler) GetMeterSpatialCounts(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	params := models.MeterSpatialCountParams{
+		GroupBy:    q.Get("groupBy"), // region, district, meter_type, region_meter_type, district_meter_type
+		MeterTypes: splitCSV(q.Get("meterType")),
+		Regions:    splitCSV(q.Get("region")),
+		Districts:  splitCSV(q.Get("district")),
+	}
+
+	// Default to region if not specified
+	if params.GroupBy == "" {
+		params.GroupBy = "region"
+	}
+
+	result, err := h.service.GetMeterSpatialCounts(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get meter spatial counts", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve counts",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GetMeterSpatialCountsByRegion returns counts grouped by region
+func (h *MeterHandler) GetMeterSpatialCountsByRegion(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	result, err := h.service.GetMeterSpatialCountsByRegion(ctx, splitCSV(q.Get("meterType")))
+	if err != nil {
+		h.logr.Error("failed to get counts by region", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve counts",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GetMeterSpatialCountsByDistrict returns counts grouped by district
+func (h *MeterHandler) GetMeterSpatialCountsByDistrict(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	result, err := h.service.GetMeterSpatialCountsByDistrict(
+		ctx,
+		q.Get("region"),
+		splitCSV(q.Get("meterType")),
+	)
+	if err != nil {
+		h.logr.Error("failed to get counts by district", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve counts",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// GetMeterSpatialCountsByType returns counts grouped by meter type
+func (h *MeterHandler) GetMeterSpatialCountsByType(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	result, err := h.service.GetMeterSpatialCountsByType(ctx)
+	if err != nil {
+		h.logr.Error("failed to get counts by type", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve counts",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
 // --- helper functions ---
 
 func splitCSV(input string) []string {

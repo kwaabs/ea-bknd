@@ -2681,6 +2681,470 @@ func (s *MeterService) GetMeterHealthMetrics(
 	}, nil
 }
 
+// GetMetersWithServiceArea returns meters with their spatial service area assignment
+func (s *MeterService) GetMetersWithServiceArea(
+	ctx context.Context,
+	params models.MeterSpatialJoinParams,
+) (*models.MeterWithServiceAreaResult, error) { // ✅ Changed return type
+
+	// Validate and set defaults
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.Limit <= 0 {
+		params.Limit = 50
+	}
+	if params.Limit > 200 {
+		params.Limit = 200
+	}
+
+	// Build query with spatial join
+	q := s.db.NewSelect().
+		ColumnExpr("m.*").
+		ColumnExpr("e.district AS service_area_district").
+		ColumnExpr("e.region AS service_area_region").
+		TableExpr("app.meters AS m").
+		Join(`LEFT JOIN dbo_ecg AS e ON ST_Intersects(
+			e.the_geom,
+			ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
+		)`)
+
+	// Apply filters
+	if len(params.MeterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(params.MeterTypes))
+	}
+
+	if len(params.Regions) > 0 {
+		// Filter by meter's own region column
+		lowerRegions := stringsToLower(params.Regions)
+		q = q.Where("LOWER(m.region) IN (?)", bun.In(lowerRegions))
+	}
+
+	if len(params.Districts) > 0 {
+		// Filter by meter's own district column
+		lowerDistricts := stringsToLower(params.Districts)
+		q = q.Where("LOWER(m.district) IN (?)", bun.In(lowerDistricts))
+	}
+
+	if len(params.ServiceAreaRegion) > 0 {
+		// Filter by spatial service area region
+		lowerServiceRegions := stringsToLower(params.ServiceAreaRegion)
+		q = q.Where("LOWER(e.region) IN (?)", bun.In(lowerServiceRegions))
+	}
+
+	if params.HasCoordinates != nil {
+		if *params.HasCoordinates {
+			// Only meters with valid coordinates
+			q = q.Where("m.latitude IS NOT NULL AND m.longitude IS NOT NULL")
+		} else {
+			// Only meters without coordinates
+			q = q.Where("m.latitude IS NULL OR m.longitude IS NULL")
+		}
+	}
+
+	if params.Search != "" {
+		search := "%" + params.Search + "%"
+		q = q.Where("m.meter_number ILIKE ? OR m.station ILIKE ? OR m.feeder_panel_name ILIKE ?",
+			search, search, search)
+	}
+
+	// Count total before pagination
+	total, err := q.Count(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply sorting
+	sortBy := params.SortBy
+	if sortBy == "" {
+		sortBy = "meter_number"
+	}
+
+	sortOrder := "ASC"
+	if strings.ToLower(params.SortOrder) == "desc" {
+		sortOrder = "DESC"
+	}
+
+	// Validate sort field to prevent SQL injection
+	validSortFields := map[string]string{
+		"meter_number":     "m.meter_number",
+		"meter_type":       "m.meter_type",
+		"region":           "m.region",
+		"district":         "m.district",
+		"station":          "m.station",
+		"service_region":   "e.region",
+		"service_district": "e.district",
+	}
+
+	if sortColumn, ok := validSortFields[sortBy]; ok {
+		q = q.OrderExpr(sortColumn + " " + sortOrder)
+	} else {
+		q = q.Order("m.meter_number ASC")
+	}
+
+	// Apply pagination
+	offset := (params.Page - 1) * params.Limit
+	q = q.Limit(params.Limit).Offset(offset)
+
+	// Execute query
+	var meters []models.MeterWithServiceArea
+	if err := q.Scan(ctx, &meters); err != nil {
+		return nil, err
+	}
+
+	// Build metadata
+	totalPages := (total + params.Limit - 1) / params.Limit
+
+	meta := map[string]any{
+		"page":  params.Page,
+		"limit": params.Limit,
+		"total": total,
+		"pages": totalPages,
+	}
+
+	// Add applied filters dynamically
+	filters := map[string]any{}
+	if len(params.MeterTypes) > 0 {
+		filters["meterTypes"] = params.MeterTypes
+	}
+	if len(params.Regions) > 0 {
+		filters["regions"] = params.Regions
+	}
+	if len(params.Districts) > 0 {
+		filters["districts"] = params.Districts
+	}
+	if len(params.ServiceAreaRegion) > 0 {
+		filters["serviceAreaRegion"] = params.ServiceAreaRegion
+	}
+	if params.HasCoordinates != nil {
+		filters["hasCoordinates"] = *params.HasCoordinates
+	}
+	if params.Search != "" {
+		filters["search"] = params.Search
+	}
+	if params.SortBy != "" {
+		filters["sortBy"] = params.SortBy
+		filters["sortOrder"] = params.SortOrder
+	}
+	if len(filters) > 0 {
+		meta["filters"] = filters
+	}
+
+	return &models.MeterWithServiceAreaResult{ // ✅ Changed struct type
+		Data: meters,
+		Meta: meta,
+	}, nil
+}
+
+// GetMeterSpatialMismatch returns meters where their assigned region/district
+// differs from their spatial service area
+func (s *MeterService) GetMeterSpatialMismatch(
+	ctx context.Context,
+	params models.MeterSpatialJoinParams,
+) (*models.MeterWithServiceAreaResult, error) { // ✅ Changed return type
+
+	// Similar to above but add WHERE clause for mismatches
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.Limit <= 0 {
+		params.Limit = 50
+	}
+
+	q := s.db.NewSelect().
+		ColumnExpr("m.*").
+		ColumnExpr("e.district AS service_area_district").
+		ColumnExpr("e.region AS service_area_region").
+		TableExpr("app.meters AS m").
+		Join(`LEFT JOIN dbo_ecg AS e ON ST_Intersects(
+			e.the_geom,
+			ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
+		)`).
+		Where("m.latitude IS NOT NULL AND m.longitude IS NOT NULL"). // Must have coordinates
+		Where(`(
+			LOWER(m.region) != LOWER(e.region) OR
+			LOWER(m.district) != LOWER(e.district) OR
+			e.region IS NULL OR
+			e.district IS NULL
+		)`) // Find mismatches
+
+	// Apply other filters
+	if len(params.MeterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(params.MeterTypes))
+	}
+
+	if params.Search != "" {
+		search := "%" + params.Search + "%"
+		q = q.Where("m.meter_number ILIKE ?", search)
+	}
+
+	// Count total
+	total, err := q.Count(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply pagination
+	offset := (params.Page - 1) * params.Limit
+	q = q.Limit(params.Limit).Offset(offset)
+
+	// Execute
+	var meters []models.MeterWithServiceArea
+	if err := q.Scan(ctx, &meters); err != nil {
+		return nil, err
+	}
+
+	meta := map[string]any{
+		"page":  params.Page,
+		"limit": params.Limit,
+		"total": total,
+		"pages": (total + params.Limit - 1) / params.Limit,
+	}
+
+	return &models.MeterWithServiceAreaResult{ // ✅ Changed struct type
+		Data: meters,
+		Meta: meta,
+	}, nil
+}
+
+// GetMeterSpatialStats returns statistics about spatial assignments
+func (s *MeterService) GetMeterSpatialStats(ctx context.Context) (map[string]interface{}, error) {
+	type stats struct {
+		TotalMeters              int `bun:"total_meters"`
+		MetersWithCoordinates    int `bun:"meters_with_coords"`
+		MetersWithoutCoordinates int `bun:"meters_without_coords"`
+		MetersInServiceArea      int `bun:"meters_in_service_area"`
+		MetersOutsideServiceArea int `bun:"meters_outside_service_area"`
+		MetersMismatchRegion     int `bun:"meters_mismatch_region"`
+		MetersMismatchDistrict   int `bun:"meters_mismatch_district"`
+	}
+
+	var result stats
+
+	err := s.db.NewRaw(`
+		WITH spatial_join AS (
+			SELECT 
+				m.*,
+				e.region AS service_area_region,
+				e.district AS service_area_district
+			FROM app.meters m
+			LEFT JOIN dbo_ecg e ON ST_Intersects(
+				e.the_geom,
+				ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
+			)
+		)
+		SELECT
+			COUNT(*) AS total_meters,
+			COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) AS meters_with_coords,
+			COUNT(CASE WHEN latitude IS NULL OR longitude IS NULL THEN 1 END) AS meters_without_coords,
+			COUNT(CASE WHEN service_area_region IS NOT NULL THEN 1 END) AS meters_in_service_area,
+			COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL AND service_area_region IS NULL THEN 1 END) AS meters_outside_service_area,
+			COUNT(CASE WHEN LOWER(region) != LOWER(service_area_region) THEN 1 END) AS meters_mismatch_region,
+			COUNT(CASE WHEN LOWER(district) != LOWER(service_area_district) THEN 1 END) AS meters_mismatch_district
+		FROM spatial_join
+	`).Scan(ctx, &result)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"total_meters":                result.TotalMeters,
+		"meters_with_coordinates":     result.MetersWithCoordinates,
+		"meters_without_coordinates":  result.MetersWithoutCoordinates,
+		"meters_in_service_area":      result.MetersInServiceArea,
+		"meters_outside_service_area": result.MetersOutsideServiceArea,
+		"meters_mismatch_region":      result.MetersMismatchRegion,
+		"meters_mismatch_district":    result.MetersMismatchDistrict,
+		"coordinate_coverage_pct":     float64(result.MetersWithCoordinates) * 100.0 / float64(result.TotalMeters),
+		"service_area_coverage_pct":   float64(result.MetersInServiceArea) * 100.0 / float64(result.MetersWithCoordinates),
+	}, nil
+}
+
+// GetMeterSpatialCounts returns aggregated meter counts by service area
+func (s *MeterService) GetMeterSpatialCounts(
+	ctx context.Context,
+	params models.MeterSpatialCountParams,
+) (*models.MeterSpatialCountResponse, error) {
+
+	// Determine what to group by
+	if params.GroupBy == "" {
+		params.GroupBy = "region"
+	}
+
+	// Build the base CTE with spatial join
+	var groupColumns []string
+	var selectColumns []string
+
+	switch params.GroupBy {
+	case "region":
+		groupColumns = []string{"service_area_region"} // ✅ Changed from "e.region"
+		selectColumns = []string{"service_area_region"}
+	case "district":
+		groupColumns = []string{"service_area_region", "service_area_district"} // ✅ Changed
+		selectColumns = []string{
+			"service_area_region",
+			"service_area_district",
+		}
+	case "meter_type":
+		groupColumns = []string{"meter_type"} // ✅ Changed from "m.meter_type"
+		selectColumns = []string{"meter_type"}
+	case "region_meter_type":
+		groupColumns = []string{"service_area_region", "meter_type"} // ✅ Changed
+		selectColumns = []string{
+			"service_area_region",
+			"meter_type",
+		}
+	case "district_meter_type":
+		groupColumns = []string{"service_area_region", "service_area_district", "meter_type"} // ✅ Changed
+		selectColumns = []string{
+			"service_area_region",
+			"service_area_district",
+			"meter_type",
+		}
+	default:
+		groupColumns = []string{"service_area_region"}
+		selectColumns = []string{"service_area_region"}
+	}
+
+	// Build query
+	q := s.db.NewSelect().
+		TableExpr(`(
+			SELECT 
+				m.*,
+				e.region AS service_area_region,
+				e.district AS service_area_district,
+				CASE 
+					WHEN LOWER(m.region) != LOWER(e.region) OR LOWER(m.district) != LOWER(e.district) 
+					THEN 1 ELSE 0 
+				END AS is_mismatched
+			FROM app.meters m
+			LEFT JOIN dbo_ecg e ON ST_Intersects(
+				e.the_geom,
+				ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
+			)
+		) AS spatial_join`)
+
+	// Add select columns
+	for _, col := range selectColumns {
+		q = q.ColumnExpr(col) // ✅ No need for alias, already correct name
+	}
+
+	// Add aggregation columns
+	q = q.ColumnExpr("COUNT(*) AS total_meters").
+		ColumnExpr("COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) AS meters_with_coords").
+		ColumnExpr("COUNT(CASE WHEN service_area_region IS NOT NULL THEN 1 END) AS meters_in_service_area").
+		ColumnExpr("SUM(is_mismatched) AS meters_mismatched")
+
+	// Apply filters
+	if len(params.MeterTypes) > 0 {
+		q = q.Where("meter_type IN (?)", bun.In(params.MeterTypes))
+	}
+
+	if len(params.Regions) > 0 {
+		lowerRegions := stringsToLower(params.Regions)
+		q = q.Where("LOWER(region) IN (?)", bun.In(lowerRegions))
+	}
+
+	if len(params.Districts) > 0 {
+		lowerDistricts := stringsToLower(params.Districts)
+		q = q.Where("LOWER(district) IN (?)", bun.In(lowerDistricts))
+	}
+
+	// Group by - ✅ Use column names from the subquery, not table aliases
+	for _, col := range groupColumns {
+		q = q.Group(col)
+	}
+
+	// Order by total meters descending
+	q = q.Order("total_meters DESC")
+
+	// Execute query
+	var results []models.MeterSpatialCount
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	// Calculate summary statistics
+	var (
+		totalMeters     int
+		totalMismatched int
+		regionsMap      = make(map[string]bool)
+		districtsMap    = make(map[string]bool)
+	)
+
+	for _, r := range results {
+		totalMeters += r.TotalMeters
+		totalMismatched += r.MetersMismatched
+
+		if r.ServiceAreaRegion != nil && *r.ServiceAreaRegion != "" {
+			regionsMap[*r.ServiceAreaRegion] = true
+		}
+		if r.ServiceAreaDistrict != nil && *r.ServiceAreaDistrict != "" {
+			districtsMap[*r.ServiceAreaDistrict] = true
+		}
+	}
+
+	avgMetersPerRegion := 0.0
+	if len(regionsMap) > 0 {
+		avgMetersPerRegion = float64(totalMeters) / float64(len(regionsMap))
+	}
+
+	mismatchPct := 0.0
+	if totalMeters > 0 {
+		mismatchPct = float64(totalMismatched) * 100.0 / float64(totalMeters)
+	}
+
+	// Build response
+	response := &models.MeterSpatialCountResponse{
+		Data: results,
+	}
+	response.Summary.TotalMeters = totalMeters
+	response.Summary.TotalRegions = len(regionsMap)
+	response.Summary.TotalDistricts = len(districtsMap)
+	response.Summary.AvgMetersPerRegion = avgMetersPerRegion
+	response.Summary.MismatchPercentage = mismatchPct
+
+	return response, nil
+}
+
+// GetMeterSpatialCountsByRegion is a convenience wrapper
+func (s *MeterService) GetMeterSpatialCountsByRegion(
+	ctx context.Context,
+	meterTypes []string,
+) (*models.MeterSpatialCountResponse, error) {
+	return s.GetMeterSpatialCounts(ctx, models.MeterSpatialCountParams{
+		GroupBy:    "region",
+		MeterTypes: meterTypes,
+	})
+}
+
+// GetMeterSpatialCountsByDistrict is a convenience wrapper
+func (s *MeterService) GetMeterSpatialCountsByDistrict(
+	ctx context.Context,
+	region string,
+	meterTypes []string,
+) (*models.MeterSpatialCountResponse, error) {
+	regions := []string{}
+	if region != "" {
+		regions = append(regions, region)
+	}
+	return s.GetMeterSpatialCounts(ctx, models.MeterSpatialCountParams{
+		GroupBy:    "district",
+		MeterTypes: meterTypes,
+		Regions:    regions,
+	})
+}
+
+// GetMeterSpatialCountsByType is a convenience wrapper
+func (s *MeterService) GetMeterSpatialCountsByType(
+	ctx context.Context,
+) (*models.MeterSpatialCountResponse, error) {
+	return s.GetMeterSpatialCounts(ctx, models.MeterSpatialCountParams{
+		GroupBy: "meter_type",
+	})
+}
+
 ///HELPER
 
 func buildReadingFilters(params models.ReadingFilterParams) []Filter {

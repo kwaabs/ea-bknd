@@ -136,6 +136,20 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 				r.Get("/daily/dtx", meterHandler.GetDTXDailyConsumption)
 				r.Get("/aggregate/dtx", meterHandler.GetDTXAggregatedConsumption)
 			})
+
+			// ✅ NEW: Spatial service area routes
+			// Spatial routes
+			r.Route("/spatial", func(r chi.Router) {
+				r.Get("/", meterHandler.GetMetersWithServiceArea)
+				r.Get("/mismatch", meterHandler.GetMeterSpatialMismatch)
+				r.Get("/stats", meterHandler.GetMeterSpatialStats)
+
+				// ✅ NEW: Aggregation/count endpoints
+				r.Get("/counts", meterHandler.GetMeterSpatialCounts) // Flexible grouping
+				r.Get("/counts/by-region", meterHandler.GetMeterSpatialCountsByRegion)
+				r.Get("/counts/by-district", meterHandler.GetMeterSpatialCountsByDistrict)
+				r.Get("/counts/by-type", meterHandler.GetMeterSpatialCountsByType)
+			})
 		})
 
 		r.Route("/feedback", func(r chi.Router) {

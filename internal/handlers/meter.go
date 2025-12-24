@@ -1743,6 +1743,76 @@ func (h *MeterHandler) GetMeterSpatialCountsByType(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusOK, result)
 }
 
+// GetTopBottomConsumers handles GET /api/meters/top-bottom-consumers
+func (h *MeterHandler) GetTopBottomConsumers(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Build filter params
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            splitCSV(q.Get("meterType")),
+		Voltages:              splitCSV(q.Get("voltage_kv")),
+	}
+
+	// Call service
+	result, err := h.service.GetTopBottomConsumers(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get top/bottom consumers", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve top/bottom consumers",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
 // --- helper functions ---
 
 func splitCSV(input string) []string {

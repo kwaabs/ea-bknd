@@ -408,3 +408,30 @@ type MeterWithServiceAreaResult struct {
 	Data []MeterWithServiceArea `json:"data"`
 	Meta any                    `json:"meta"`
 }
+
+// MeterConsumption represents individual meter consumption
+type MeterConsumption struct {
+	MeterNumber           string  `bun:"meter_number" json:"meter_number"`
+	MeterType             string  `bun:"meter_type" json:"meter_type"`
+	Location              string  `bun:"location" json:"location,omitempty"`
+	Region                string  `bun:"region" json:"region,omitempty"`
+	District              string  `bun:"district" json:"district,omitempty"`
+	Station               string  `bun:"station" json:"station,omitempty"`
+	FeederPanelName       string  `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
+	VoltagekV             string  `bun:"voltage_kv" json:"voltage_kv,omitempty"`
+	MeteringPoint         *string `bun:"metering_point" json:"metering_point,omitempty"`
+	BoundaryMeteringPoint *string `bun:"boundary_metering_point" json:"boundary_metering_point,omitempty"`
+	TotalImportKwh        float64 `bun:"total_import_kwh" json:"total_import_kwh"`
+	TotalExportKwh        float64 `bun:"total_export_kwh" json:"total_export_kwh"`
+	ReadingCount          int     `bun:"reading_count" json:"reading_count"`
+}
+
+// MeterTypeConsumers represents top/bottom consumers per meter type
+type MeterTypeConsumers struct {
+	MeterType            string            `json:"meter_type"`
+	MeterCount           int               `json:"meter_count"`
+	TopImportConsumer    *MeterConsumption `json:"top_import_consumer"`
+	BottomImportConsumer *MeterConsumption `json:"bottom_import_consumer"`
+	TopExportConsumer    *MeterConsumption `json:"top_export_consumer"`
+	BottomExportConsumer *MeterConsumption `json:"bottom_export_consumer"`
+}

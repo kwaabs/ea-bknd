@@ -1813,6 +1813,717 @@ func (h *MeterHandler) GetTopBottomConsumers(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, result)
 }
 
+// GetMeterHealthSummary handles GET /api/v1/meters/health/summary
+func (h *MeterHandler) GetMeterHealthSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Build filter params
+	params := models.ReadingFilterParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(q.Get("meterNumber")),
+		Regions:               splitCSV(q.Get("region")),
+		Districts:             splitCSV(q.Get("district")),
+		Stations:              splitCSV(q.Get("station")),
+		Locations:             splitCSV(q.Get("location")),
+		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+		MeterTypes:            splitCSV(q.Get("meterType")),
+		Voltages:              splitCSV(q.Get("voltage_kv")),
+	}
+
+	// Call service
+	summary, err := h.service.GetMeterHealthSummary(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get meter health summary", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   "failed to retrieve meter health summary",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    summary,
+	})
+}
+
+// GetMeterHealthDetails handles GET /api/v1/meters/health/details
+func (h *MeterHandler) GetMeterHealthDetails(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Parse pagination parameters
+	page := 1
+	if pageStr := q.Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	limit := 50
+	if limitStr := q.Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 200 {
+			limit = l
+		}
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Parse and validate health category
+	healthCategory := strings.ToLower(strings.TrimSpace(q.Get("healthCategory")))
+	validCategories := map[string]bool{
+		"excellent": true,
+		"good":      true,
+		"poor":      true,
+		"critical":  true,
+		"online":    true,
+		"offline":   true,
+		"":          true, // Allow empty for all
+	}
+	if !validCategories[healthCategory] {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid healthCategory parameter, must be one of: excellent, good, poor, critical, online, offline",
+		})
+		return
+	}
+
+	// Parse sorting parameters
+	sortBy := q.Get("sortBy")
+	sortOrder := strings.ToLower(q.Get("sortOrder"))
+	if sortOrder == "" {
+		sortOrder = "desc"
+	}
+
+	// Validate sortBy
+	validSortFields := map[string]bool{
+		"meter_number": true,
+		"uptime":       true,
+		"meter_type":   true,
+		"last_seen":    true,
+		"consumption":  true,
+		"":             true, // default
+	}
+	if !validSortFields[sortBy] {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid sortBy parameter, must be one of: meter_number, uptime, meter_type, last_seen, consumption",
+		})
+		return
+	}
+
+	// Validate sortOrder
+	if sortOrder != "asc" && sortOrder != "desc" {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid sortOrder parameter, must be 'asc' or 'desc'",
+		})
+		return
+	}
+
+	// Build filter params
+	params := models.MeterHealthDetailParams{
+		ReadingFilterParams: models.ReadingFilterParams{
+			DateFrom:              dateFrom,
+			DateTo:                dateTo,
+			MeterNumber:           splitCSV(q.Get("meterNumber")),
+			Regions:               splitCSV(q.Get("region")),
+			Districts:             splitCSV(q.Get("district")),
+			Stations:              splitCSV(q.Get("station")),
+			Locations:             splitCSV(q.Get("location")),
+			BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
+			MeterTypes:            splitCSV(q.Get("meterType")),
+			Voltages:              splitCSV(q.Get("voltage_kv")),
+		},
+		Page:           page,
+		Limit:          limit,
+		Search:         q.Get("search"),
+		HealthCategory: healthCategory,
+		SortBy:         sortBy,
+		SortOrder:      sortOrder,
+	}
+
+	// Call service
+	details, err := h.service.GetMeterHealthDetails(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get meter health details", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   "failed to retrieve meter health details",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    details,
+	})
+}
+
+// GetRegions returns a list of unique regions from meters table
+func (h *MeterHandler) GetRegions(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Optional meter type filter
+	meterTypes := splitCSV(q.Get("meterType"))
+
+	regions, err := h.service.GetUniqueRegions(ctx, meterTypes)
+	if err != nil {
+		h.logr.Error("failed to get regions", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve regions",
+		})
+		return
+	}
+
+	response := map[string]interface{}{
+		"regions": regions,
+		"count":   len(regions),
+	}
+
+	if len(meterTypes) > 0 {
+		response["filters"] = map[string]interface{}{
+			"meterTypes": meterTypes,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+// GetDistricts returns a list of unique districts from meters table
+func (h *MeterHandler) GetDistricts(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	region := q.Get("region")
+	meterTypes := splitCSV(q.Get("meterType"))
+
+	districts, err := h.service.GetUniqueDistricts(ctx, region, meterTypes)
+	if err != nil {
+		h.logr.Error("failed to get districts", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve districts",
+		})
+		return
+	}
+
+	response := map[string]interface{}{
+		"districts": districts,
+		"count":     len(districts),
+	}
+
+	filters := map[string]interface{}{}
+	if region != "" {
+		filters["region"] = region
+	}
+	if len(meterTypes) > 0 {
+		filters["meterTypes"] = meterTypes
+	}
+	if len(filters) > 0 {
+		response["filters"] = filters
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+// GetStations returns a list of unique stations from meters table
+func (h *MeterHandler) GetStations(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	region := q.Get("region")
+	district := q.Get("district")
+	meterTypes := splitCSV(q.Get("meterType"))
+
+	stations, err := h.service.GetUniqueStations(ctx, region, district, meterTypes)
+	if err != nil {
+		h.logr.Error("failed to get stations", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve stations",
+		})
+		return
+	}
+
+	response := map[string]interface{}{
+		"stations": stations,
+		"count":    len(stations),
+	}
+
+	filters := map[string]interface{}{}
+	if region != "" {
+		filters["region"] = region
+	}
+	if district != "" {
+		filters["district"] = district
+	}
+	if len(meterTypes) > 0 {
+		filters["meterTypes"] = meterTypes
+	}
+	if len(filters) > 0 {
+		response["filters"] = filters
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+// GetLocations returns a list of unique locations from meters table
+func (h *MeterHandler) GetLocations(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	region := q.Get("region")
+	district := q.Get("district")
+	meterTypes := splitCSV(q.Get("meterType"))
+
+	locations, err := h.service.GetUniqueLocations(ctx, region, district, meterTypes)
+	if err != nil {
+		h.logr.Error("failed to get locations", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve locations",
+		})
+		return
+	}
+
+	response := map[string]interface{}{
+		"locations": locations,
+		"count":     len(locations),
+	}
+
+	filters := map[string]interface{}{}
+	if region != "" {
+		filters["region"] = region
+	}
+	if district != "" {
+		filters["district"] = district
+	}
+	if len(meterTypes) > 0 {
+		filters["meterTypes"] = meterTypes
+	}
+	if len(filters) > 0 {
+		response["filters"] = filters
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+// GetBoundaryPoints returns a list of unique boundary metering points
+func (h *MeterHandler) GetBoundaryPoints(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	region := q.Get("region")
+	district := q.Get("district")
+	meterTypes := splitCSV(q.Get("meterType"))
+
+	boundaryPoints, err := h.service.GetUniqueBoundaryPoints(ctx, region, district, meterTypes)
+	if err != nil {
+		h.logr.Error("failed to get boundary points", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve boundary points",
+		})
+		return
+	}
+
+	response := map[string]interface{}{
+		"boundaryPoints": boundaryPoints,
+		"count":          len(boundaryPoints),
+	}
+
+	filters := map[string]interface{}{}
+	if region != "" {
+		filters["region"] = region
+	}
+	if district != "" {
+		filters["district"] = district
+	}
+	if len(meterTypes) > 0 {
+		filters["meterTypes"] = meterTypes
+	}
+	if len(filters) > 0 {
+		response["filters"] = filters
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+// GetVoltages returns a list of unique voltage levels
+func (h *MeterHandler) GetVoltages(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	region := q.Get("region")
+	district := q.Get("district")
+	meterTypes := splitCSV(q.Get("meterType"))
+
+	voltages, err := h.service.GetUniqueVoltages(ctx, region, district, meterTypes)
+	if err != nil {
+		h.logr.Error("failed to get voltages", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to retrieve voltages",
+		})
+		return
+	}
+
+	response := map[string]interface{}{
+		"voltages": voltages,
+		"count":    len(voltages),
+	}
+
+	filters := map[string]interface{}{}
+	if region != "" {
+		filters["region"] = region
+	}
+	if district != "" {
+		filters["district"] = district
+	}
+	if len(meterTypes) > 0 {
+		filters["meterTypes"] = meterTypes
+	}
+	if len(filters) > 0 {
+		response["filters"] = filters
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+// GetRegionalMapConsumption handles GET /api/v1/meters/consumption/regional-map
+func (h *MeterHandler) GetRegionalMapConsumption(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Build filter params
+	params := models.RegionalMapParams{
+		DateFrom:  dateFrom,
+		DateTo:    dateTo,
+		MeterType: splitCSV(q.Get("meterType")),
+		Region:    q.Get("region"),
+		District:  q.Get("district"),
+		Location:  q.Get("location"),
+	}
+
+	// Call service
+	result, err := h.service.GetRegionalMapConsumption(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get regional map consumption", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   "failed to retrieve regional map data",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    result,
+	})
+}
+
+// GetDistrictGeometries handles GET /api/v1/meters/geometries/districts
+func (h *MeterHandler) GetDistrictGeometries(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	regions := splitCSV(q.Get("region"))
+	districts := splitCSV(q.Get("district"))
+
+	// Call service
+	geometries, err := h.service.GetDistrictGeometries(ctx, regions, districts)
+	if err != nil {
+		h.logr.Error("failed to get district geometries", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   "failed to retrieve district geometries",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"version": geometries.Version,
+		"data":    geometries,
+	})
+}
+
+// GetDistrictTimeseriesConsumption handles GET /api/v1/meters/consumption/districts-timeseries
+func (h *MeterHandler) GetDistrictTimeseriesConsumption(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Build filter params
+	params := models.DistrictConsumptionParams{
+		DateFrom:  dateFrom,
+		DateTo:    dateTo,
+		MeterType: splitCSV(q.Get("meterType")),
+		Region:    splitCSV(q.Get("region")),
+		District:  splitCSV(q.Get("district")),
+	}
+
+	// Call service
+	timeseries, err := h.service.GetDistrictTimeseriesConsumption(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get district timeseries consumption", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   "failed to retrieve district timeseries",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    timeseries,
+	})
+}
+
 // --- helper functions ---
 
 func splitCSV(input string) []string {

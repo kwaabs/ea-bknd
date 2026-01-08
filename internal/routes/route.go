@@ -84,6 +84,23 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 		r.Route("/meters", func(r chi.Router) {
 			//r.Use(authMW.JWTAuth) // protect with JWT
 
+			// In your router setup
+			r.Route("/metadata", func(r chi.Router) {
+				r.Get("/regions", meterHandler.GetRegions)
+				r.Get("/districts", meterHandler.GetDistricts)
+				r.Get("/stations", meterHandler.GetStations)
+				r.Get("/locations", meterHandler.GetLocations)
+
+				r.Get("/boundary-points", meterHandler.GetBoundaryPoints)
+				r.Get("/voltages", meterHandler.GetVoltages)
+			})
+
+			// Geometry endpoints
+			r.Get("/geometries/districts", meterHandler.GetDistrictGeometries)
+
+			// Timeseries endpoints
+			r.Get("/consumption/districts-timeseries", meterHandler.GetDistrictTimeseriesConsumption)
+
 			// Basic meter operations
 			r.Get("/", meterHandler.QueryMeters)
 			r.Get("/{id}", meterHandler.GetMeterByID)
@@ -103,6 +120,8 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 			// ✅ HEALTH ENDPOINT - NEW (Phase 2, Optional)
 			r.Route("/health", func(r chi.Router) {
 				r.Get("/metrics", meterHandler.GetMeterHealthMetrics)
+				r.Get("/summary", meterHandler.GetMeterHealthSummary)
+				r.Get("/summary/details", meterHandler.GetMeterHealthDetails)
 			})
 
 			// Keep existing readings routes unchanged
@@ -115,7 +134,8 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 			// ✅ CONSUMPTION ENDPOINTS - ENHANCED
 			r.Route("/consumption", func(r chi.Router) {
 				// NEW - Phase 2
-				r.Get("/by-region", meterHandler.GetConsumptionByRegion) // Regional supply patterns
+				r.Get("/by-region", meterHandler.GetConsumptionByRegion)       // Regional supply patterns
+				r.Get("/regional-map", meterHandler.GetRegionalMapConsumption) // Regional supply patterns
 
 				// Keep ALL existing routes unchanged
 				r.Get("/daily", meterHandler.GetDailyConsumption)
@@ -139,7 +159,6 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 			})
 
 			// ✅ NEW: Spatial service area routes
-			// Spatial routes
 			r.Route("/spatial", func(r chi.Router) {
 				r.Get("/", meterHandler.GetMetersWithServiceArea)
 				r.Get("/mismatch", meterHandler.GetMeterSpatialMismatch)

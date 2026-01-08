@@ -3,8 +3,10 @@ package services
 import (
 	"bknd-1/internal/models"
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/uptrace/bun"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -2455,7 +2457,7 @@ func (s *MeterService) GetMetersWithServiceArea(
 		ColumnExpr("e.district AS service_area_district").
 		ColumnExpr("e.region AS service_area_region").
 		TableExpr("app.meters AS m").
-		Join(`LEFT JOIN dbo_ecg AS e ON ST_Intersects(
+		Join(`LEFT JOIN app.dbo_ecg AS e ON ST_Intersects(
 			e.the_geom,
 			ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
 		)`)
@@ -2607,7 +2609,7 @@ func (s *MeterService) GetMeterSpatialMismatch(
 		ColumnExpr("e.district AS service_area_district").
 		ColumnExpr("e.region AS service_area_region").
 		TableExpr("app.meters AS m").
-		Join(`LEFT JOIN dbo_ecg AS e ON ST_Intersects(
+		Join(`LEFT JOIN app.dbo_ecg AS e ON ST_Intersects(
 			e.the_geom,
 			ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
 		)`).
@@ -2679,7 +2681,7 @@ func (s *MeterService) GetMeterSpatialStats(ctx context.Context) (map[string]int
 				e.region AS service_area_region,
 				e.district AS service_area_district
 			FROM app.meters m
-			LEFT JOIN dbo_ecg e ON ST_Intersects(
+			LEFT JOIN app.dbo_ecg e ON ST_Intersects(
 				e.the_geom,
 				ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
 			)
@@ -2770,7 +2772,7 @@ func (s *MeterService) GetMeterSpatialCounts(
 					THEN 1 ELSE 0 
 				END AS is_mismatched
 			FROM app.meters m
-			LEFT JOIN dbo_ecg e ON ST_Intersects(
+			LEFT JOIN app.dbo_ecg e ON ST_Intersects(
 				e.the_geom,
 				ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
 			)
@@ -3005,6 +3007,1253 @@ func (s *MeterService) GetTopBottomConsumers(
 	}
 
 	return result, nil
+}
+
+// GetMeterHealthSummary returns overall meter health statistics with uptime distribution
+func (s *MeterService) GetMeterHealthSummary(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) (*models.MeterHealthSummary, error) {
+
+	// Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
+
+	filters := buildReadingFilters(params)
+
+	// Main query for overall health metrics
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.has_actual_data = true THEN mtr.meter_number 
+			END) as online_meters
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.has_actual_data = false OR mcd.meter_number IS NULL THEN mtr.meter_number 
+			END) as offline_meters
+		`).
+		ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage > 95 THEN mtr.meter_number 
+			END) as excellent
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage >= 80 AND mcd.uptime_percentage <= 95 THEN mtr.meter_number 
+			END) as good
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage >= 60 AND mcd.uptime_percentage < 80 THEN mtr.meter_number 
+			END) as poor
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.uptime_percentage < 60 THEN mtr.meter_number 
+			END) as critical
+		`).
+		Join(`
+			LEFT JOIN (
+				SELECT 
+					meter_number,
+					MAX(consumption_date) as last_consumption_date,
+					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
+					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 / 
+					 ?) as uptime_percentage
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, params.DateFrom, params.DateTo)
+
+	// Apply meter filters (skip date filters since they're in the subquery)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// Result struct for overall metrics
+	var overallResult struct {
+		TotalMeters   int     `bun:"total_meters"`
+		OnlineMeters  int     `bun:"online_meters"`
+		OfflineMeters int     `bun:"offline_meters"`
+		AvgUptime     float64 `bun:"avg_uptime"`
+		Excellent     int     `bun:"excellent"`
+		Good          int     `bun:"good"`
+		Poor          int     `bun:"poor"`
+		Critical      int     `bun:"critical"`
+	}
+
+	if err := q.Scan(ctx, &overallResult); err != nil {
+		return nil, err
+	}
+
+	// Query for breakdown by meter type
+	qByType := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_type").
+		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.has_actual_data = true THEN mtr.meter_number 
+			END) as online
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE 
+				WHEN mcd.has_actual_data = false OR mcd.meter_number IS NULL THEN mtr.meter_number 
+			END) as offline
+		`).
+		ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
+		Join(`
+			LEFT JOIN (
+				SELECT 
+					meter_number,
+					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
+					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 / 
+					 ?) as uptime_percentage
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, params.DateFrom, params.DateTo)
+
+	// Apply same filters as overall query
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		qByType = qByType.Where(f.Query, f.Args...)
+	}
+
+	qByType = qByType.Group("mtr.meter_type").Order("mtr.meter_type")
+
+	var byMeterType []models.MeterHealthByMeterType
+	if err := qByType.Scan(ctx, &byMeterType); err != nil {
+		return nil, err
+	}
+
+	// Calculate health percentage
+	healthPercentage := 0.0
+	if overallResult.TotalMeters > 0 {
+		healthPercentage = float64(overallResult.OnlineMeters) * 100.0 / float64(overallResult.TotalMeters)
+	}
+
+	return &models.MeterHealthSummary{
+		TotalMeters:             overallResult.TotalMeters,
+		OnlineMeters:            overallResult.OnlineMeters,
+		OfflineMeters:           overallResult.OfflineMeters,
+		HealthPercentage:        healthPercentage,
+		AverageUptimePercentage: overallResult.AvgUptime,
+		ByMeterType:             byMeterType,
+		UptimeDistribution: models.MeterUptimeDistribution{
+			Excellent: overallResult.Excellent,
+			Good:      overallResult.Good,
+			Poor:      overallResult.Poor,
+			Critical:  overallResult.Critical,
+		},
+	}, nil
+}
+
+// GetMeterHealthDetails returns paginated meter health details with filtering
+func (s *MeterService) GetMeterHealthDetails(
+	ctx context.Context,
+	params models.MeterHealthDetailParams,
+) (*models.MeterHealthDetailResponse, error) {
+
+	// Validate and set defaults
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.Limit <= 0 || params.Limit > 200 {
+		params.Limit = 50
+	}
+	if params.SortOrder == "" {
+		params.SortOrder = "desc"
+	}
+
+	// Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
+
+	filters := buildReadingFilters(params.ReadingFilterParams)
+
+	// Build the main CTE with meter health calculations
+	baseCTE := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_number").
+		Column("mtr.meter_type").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.location").
+		Column("mtr.voltage_kv").
+		Column("mtr.boundary_metering_point").
+		ColumnExpr(`
+			CASE 
+				WHEN mcd.has_actual_data = true THEN 'ONLINE'
+				ELSE 'OFFLINE'
+			END as status
+		`).
+		ColumnExpr(`
+			CASE 
+				WHEN mcd.uptime_percentage > 95 THEN 'excellent'
+				WHEN mcd.uptime_percentage >= 80 AND mcd.uptime_percentage <= 95 THEN 'good'
+				WHEN mcd.uptime_percentage >= 60 AND mcd.uptime_percentage < 80 THEN 'poor'
+				WHEN mcd.uptime_percentage < 60 THEN 'critical'
+				ELSE 'offline'
+			END as health_category
+		`).
+		ColumnExpr("COALESCE(mcd.uptime_percentage, 0) as uptime_percentage").
+		ColumnExpr("COALESCE(mcd.days_online, 0) as days_online").
+		ColumnExpr("COALESCE(mcd.days_offline, ?) as days_offline", daysInRange).
+		ColumnExpr("? as total_days", daysInRange).
+		ColumnExpr("mcd.last_seen_date").
+		ColumnExpr("COALESCE(mcd.total_consumption, 0) as total_consumption_kwh").
+		ColumnExpr(`
+			CASE 
+				WHEN mcd.days_online > 0 THEN ROUND((mcd.total_consumption / mcd.days_online)::numeric, 2)
+				ELSE 0
+			END as avg_daily_consumption
+		`).
+		Join(`
+			LEFT JOIN (
+				SELECT 
+					meter_number,
+					MAX(consumption_date) as last_seen_date,
+					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
+					COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) as days_online,
+					? - COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) as days_offline,
+					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 / ?) as uptime_percentage,
+					SUM(consumption) as total_consumption
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, daysInRange, params.DateFrom, params.DateTo)
+
+	// Apply meter filters (skip date filters since they're in the subquery)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		baseCTE = baseCTE.Where(f.Query, f.Args...)
+	}
+
+	// Apply search filter
+	if params.Search != "" {
+		baseCTE = baseCTE.Where("mtr.meter_number ILIKE ?", "%"+params.Search+"%")
+	}
+
+	// Fast count query - wrap the CTE
+	countQuery := s.db.NewSelect().
+		TableExpr("(?) AS health_data", baseCTE).
+		ColumnExpr("COUNT(*)")
+
+	// Apply health category filter to count
+	if params.HealthCategory != "" {
+		countQuery = countQuery.Where("health_category = ?", strings.ToLower(params.HealthCategory))
+	}
+
+	totalCount, err := countQuery.Count(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Main query - reuse the CTE
+	q := s.db.NewSelect().
+		TableExpr("(?) AS health_data", baseCTE)
+
+	// Apply health category filter
+	if params.HealthCategory != "" {
+		q = q.Where("health_category = ?", strings.ToLower(params.HealthCategory))
+	}
+
+	// Apply sorting
+	sortOrder := "DESC"
+	if strings.ToLower(params.SortOrder) == "asc" {
+		sortOrder = "ASC"
+	}
+
+	switch params.SortBy {
+	case "uptime":
+		q = q.OrderExpr("uptime_percentage " + sortOrder)
+	case "meter_type":
+		q = q.OrderExpr("meter_type " + sortOrder)
+	case "last_seen":
+		q = q.OrderExpr("last_seen_date " + sortOrder + " NULLS LAST")
+	case "consumption":
+		q = q.OrderExpr("total_consumption_kwh " + sortOrder)
+	case "meter_number":
+		q = q.OrderExpr("meter_number " + sortOrder)
+	default:
+		q = q.OrderExpr("uptime_percentage " + sortOrder)
+	}
+
+	// Apply pagination
+	offset := (params.Page - 1) * params.Limit
+	q = q.Limit(params.Limit).Offset(offset)
+
+	// Execute query
+	var records []models.MeterHealthDetailRecord
+	if err := q.Scan(ctx, &records); err != nil {
+		return nil, err
+	}
+
+	// Calculate summary stats from results
+	var totalOnline, totalOffline int
+	var sumUptime float64
+	for _, r := range records {
+		if r.Status == "ONLINE" {
+			totalOnline++
+		} else {
+			totalOffline++
+		}
+		sumUptime += r.UptimePercentage
+	}
+
+	avgUptime := 0.0
+	if len(records) > 0 {
+		avgUptime = sumUptime / float64(len(records))
+	}
+
+	// Build response
+	totalPages := (totalCount + params.Limit - 1) / params.Limit
+	hasMore := params.Page < totalPages
+
+	// Build filters applied map
+	filtersApplied := map[string]interface{}{
+		"dateFrom": params.DateFrom.Format("2006-01-02"),
+		"dateTo":   params.DateTo.Format("2006-01-02"),
+	}
+	if len(params.Regions) > 0 {
+		filtersApplied["region"] = params.Regions
+	}
+	if len(params.MeterTypes) > 0 {
+		filtersApplied["meterType"] = params.MeterTypes
+	}
+	if params.Search != "" {
+		filtersApplied["search"] = params.Search
+	}
+	if params.HealthCategory != "" {
+		filtersApplied["healthCategory"] = params.HealthCategory
+	}
+	if params.SortBy != "" {
+		filtersApplied["sortBy"] = params.SortBy
+		filtersApplied["sortOrder"] = params.SortOrder
+	}
+
+	response := &models.MeterHealthDetailResponse{
+		Data:           records,
+		FiltersApplied: filtersApplied,
+	}
+	response.Pagination.Page = params.Page
+	response.Pagination.Limit = params.Limit
+	response.Pagination.TotalRecords = totalCount
+	response.Pagination.TotalPages = totalPages
+	response.Pagination.HasMore = hasMore
+
+	response.Summary.HealthCategory = params.HealthCategory
+	response.Summary.AverageUptime = avgUptime
+	response.Summary.TotalOnline = totalOnline
+	response.Summary.TotalOffline = totalOffline
+
+	return response, nil
+}
+
+// GetUniqueDistricts returns all unique districts from dbo_ecg table (whether meters exist or not)
+func (s *MeterService) GetUniqueDistricts(ctx context.Context, region string, meterTypes []string) ([]string, error) {
+	var districts []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.dbo_ecg AS e").
+		ColumnExpr("DISTINCT LOWER(e.district) as district").
+		Join("LEFT JOIN app.meters AS m ON LOWER(e.district) = LOWER(m.district)").
+		Where("e.district IS NOT NULL AND e.district != ''")
+
+	if region != "" {
+		q = q.Where("LOWER(e.region) = ?", strings.ToLower(region))
+	}
+
+	if len(meterTypes) > 0 {
+		// Only show districts that have meters of these types
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("district ASC")
+
+	if err := q.Scan(ctx, &districts); err != nil {
+		return nil, err
+	}
+
+	return districts, nil
+}
+
+// GetUniqueRegions returns all unique regions from dbo_ecg table (whether meters exist or not)
+func (s *MeterService) GetUniqueRegions(ctx context.Context, meterTypes []string) ([]string, error) {
+	var regions []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.dbo_ecg AS e").
+		ColumnExpr("DISTINCT LOWER(e.region) as region").
+		Join("LEFT JOIN app.meters AS m ON LOWER(e.region) = LOWER(m.region)").
+		Where("e.region IS NOT NULL AND e.region != ''")
+
+	if len(meterTypes) > 0 {
+		// Only show regions that have meters of these types
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("region ASC")
+
+	if err := q.Scan(ctx, &regions); err != nil {
+		return nil, err
+	}
+
+	return regions, nil
+}
+
+// GetUniqueStations returns all unique stations from meters table with left join on dbo_ecg
+func (s *MeterService) GetUniqueStations(ctx context.Context, region, district string, meterTypes []string) ([]string, error) {
+	var stations []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS m").
+		ColumnExpr("DISTINCT LOWER(m.station) as station").
+		Join("LEFT JOIN app.dbo_ecg AS e ON LOWER(m.district) = LOWER(e.district)").
+		Where("m.station IS NOT NULL AND m.station != ''")
+
+	if region != "" {
+		q = q.Where("LOWER(m.region) = ?", strings.ToLower(region))
+	}
+
+	if district != "" {
+		q = q.Where("LOWER(m.district) = ?", strings.ToLower(district))
+	}
+
+	if len(meterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("station ASC")
+
+	if err := q.Scan(ctx, &stations); err != nil {
+		return nil, err
+	}
+
+	return stations, nil
+}
+
+// GetUniqueLocations returns all unique locations from meters table with left join on dbo_ecg
+func (s *MeterService) GetUniqueLocations(ctx context.Context, region, district string, meterTypes []string) ([]string, error) {
+	var locations []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS m").
+		ColumnExpr("DISTINCT LOWER(m.location) as location").
+		Join("LEFT JOIN app.dbo_ecg AS e ON LOWER(m.district) = LOWER(e.district)").
+		Where("m.location IS NOT NULL AND m.location != ''")
+
+	if region != "" {
+		q = q.Where("LOWER(m.region) = ?", strings.ToLower(region))
+	}
+
+	if district != "" {
+		q = q.Where("LOWER(m.district) = ?", strings.ToLower(district))
+	}
+
+	if len(meterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("location ASC")
+
+	if err := q.Scan(ctx, &locations); err != nil {
+		return nil, err
+	}
+
+	return locations, nil
+}
+
+// GetUniqueBoundaryPoints returns all unique boundary metering points with left join on dbo_ecg
+func (s *MeterService) GetUniqueBoundaryPoints(ctx context.Context, region, district string, meterTypes []string) ([]string, error) {
+	var boundaryPoints []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS m").
+		ColumnExpr("DISTINCT LOWER(m.boundary_metering_point) as boundary_metering_point").
+		Join("LEFT JOIN app.dbo_ecg AS e ON LOWER(m.district) = LOWER(e.district)").
+		Where("m.boundary_metering_point IS NOT NULL AND m.boundary_metering_point != ''")
+
+	if region != "" {
+		q = q.Where("LOWER(m.region) = ?", strings.ToLower(region))
+	}
+
+	if district != "" {
+		q = q.Where("LOWER(m.district) = ?", strings.ToLower(district))
+	}
+
+	if len(meterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("boundary_metering_point ASC")
+
+	if err := q.Scan(ctx, &boundaryPoints); err != nil {
+		return nil, err
+	}
+
+	return boundaryPoints, nil
+}
+
+// GetUniqueVoltages returns all unique voltage levels with left join on dbo_ecg
+func (s *MeterService) GetUniqueVoltages(ctx context.Context, region, district string, meterTypes []string) ([]float64, error) {
+	var voltages []float64
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS m").
+		ColumnExpr("DISTINCT m.voltage_kv").
+		Join("LEFT JOIN app.dbo_ecg AS e ON LOWER(m.district) = LOWER(e.district)").
+		Where("m.voltage_kv IS NOT NULL")
+
+	if region != "" {
+		q = q.Where("LOWER(m.region) = ?", strings.ToLower(region))
+	}
+
+	if district != "" {
+		q = q.Where("LOWER(m.district) = ?", strings.ToLower(district))
+	}
+
+	if len(meterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("m.voltage_kv ASC")
+
+	if err := q.Scan(ctx, &voltages); err != nil {
+		return nil, err
+	}
+
+	return voltages, nil
+}
+
+// GetUniqueMeterTypes returns all unique meter types (no join needed)
+func (s *MeterService) GetUniqueMeterTypes(ctx context.Context) ([]string, error) {
+	var meterTypes []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters").
+		ColumnExpr("DISTINCT meter_type").
+		Where("meter_type IS NOT NULL AND meter_type != ''").
+		Order("meter_type ASC")
+
+	if err := q.Scan(ctx, &meterTypes); err != nil {
+		return nil, err
+	}
+
+	return meterTypes, nil
+}
+
+// GetRegionalMapConsumption returns consumption data by district with GeoJSON for mapping
+
+// GetRegionalMapConsumption returns consumption data by district with GeoJSON for mapping
+
+func (s *MeterService) GetRegionalMapConsumption(
+	ctx context.Context,
+	params models.RegionalMapParams,
+) (*models.RegionalMapResponse, error) {
+
+	// First, get ALL districts with their GeoJSON
+	var allDistricts []struct {
+		District string          `bun:"district"`
+		Region   string          `bun:"region"`
+		GeoJSON  json.RawMessage `bun:"geojson"`
+	}
+
+	// Query to get all districts from dbo_ecg
+	districtQuery := s.db.NewSelect().
+		Column("district").
+		Column("region").
+		ColumnExpr("ST_AsGeoJSON(the_geom)::jsonb as geojson").
+		TableExpr("app.dbo_ecg").
+		Where("district IS NOT NULL").
+		Where("region IS NOT NULL")
+
+	if params.Region != "" {
+		districtQuery = districtQuery.Where("LOWER(region) = ?", strings.ToLower(params.Region))
+	}
+
+	if params.District != "" {
+		districtQuery = districtQuery.Where("LOWER(district) = ?", strings.ToLower(params.District))
+	}
+
+	if err := districtQuery.Scan(ctx, &allDistricts); err != nil {
+		return nil, fmt.Errorf("failed to get districts: %w", err)
+	}
+
+	// Build the consumption query
+	var queryBuilder strings.Builder
+	var args []interface{}
+
+	// Start building the CTE
+	queryBuilder.WriteString(`
+        WITH district_consumption AS (
+            -- Try spatial join first (coordinates available)
+            SELECT 
+                d.district,
+                d.region,
+                m.meter_type,
+                m.meter_number,
+                m.location,
+                m.station,
+                m.feeder_panel_name,
+                m.boundary_metering_point,
+                m.voltage_kv,
+                m.ic_og,
+                DATE(mcd.consumption_date) as consumption_date,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_import_kwh,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh,
+                'spatial' as match_type
+            FROM app.dbo_ecg d
+            INNER JOIN app.meters m 
+                ON ST_Intersects(d.the_geom, ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326))
+                AND m.latitude IS NOT NULL 
+                AND m.longitude IS NOT NULL
+            LEFT JOIN app.meter_consumption_daily mcd 
+                ON m.meter_number = mcd.meter_number
+                AND mcd.consumption_date BETWEEN ? AND ?
+            LEFT JOIN app.data_item_mapping dim 
+                ON mcd.data_item_id = dim.data_item_id
+            WHERE d.district IS NOT NULL
+                AND d.region IS NOT NULL
+                AND m.meter_type IS NOT NULL
+    `)
+
+	// Add date parameters for first UNION
+	args = append(args, params.DateFrom, params.DateTo)
+
+	// Add filters for first UNION
+	if len(params.MeterType) > 0 {
+		queryBuilder.WriteString(` AND m.meter_type IN (?)`)
+		args = append(args, bun.In(stringsToUpper(params.MeterType)))
+	}
+
+	if params.Region != "" {
+		queryBuilder.WriteString(` AND LOWER(d.region) = ?`)
+		args = append(args, strings.ToLower(params.Region))
+	}
+
+	if params.District != "" {
+		queryBuilder.WriteString(` AND LOWER(d.district) = ?`)
+		args = append(args, strings.ToLower(params.District))
+	}
+
+	// Close first UNION and start second
+	queryBuilder.WriteString(`
+            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station, 
+                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name, 
+                     m.ic_og, DATE(mcd.consumption_date)
+            
+            UNION ALL
+            
+            -- Fallback: District name matching (for meters without coordinates or not intersecting)
+            SELECT 
+                d.district,
+                d.region,
+                m.meter_type,
+                m.meter_number,
+                m.location,
+                m.station,
+                m.feeder_panel_name,
+                m.boundary_metering_point,
+                m.voltage_kv,
+                m.ic_og,
+                DATE(mcd.consumption_date) as consumption_date,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_import_kwh,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh,
+                'district_name' as match_type
+            FROM app.dbo_ecg d
+            INNER JOIN app.meters m 
+                ON LOWER(TRIM(d.district)) = LOWER(TRIM(m.district))
+                AND (m.latitude IS NULL OR m.longitude IS NULL)  -- Only meters without coordinates
+            LEFT JOIN app.meter_consumption_daily mcd 
+                ON m.meter_number = mcd.meter_number
+                AND mcd.consumption_date BETWEEN ? AND ?
+            LEFT JOIN app.data_item_mapping dim 
+                ON mcd.data_item_id = dim.data_item_id
+            WHERE d.district IS NOT NULL
+                AND d.region IS NOT NULL
+                AND m.meter_type IS NOT NULL
+                AND m.district IS NOT NULL
+    `)
+
+	// Add date parameters for second UNION
+	args = append(args, params.DateFrom, params.DateTo)
+
+	// Add filters for second UNION
+	if len(params.MeterType) > 0 {
+		queryBuilder.WriteString(` AND m.meter_type IN (?)`)
+		args = append(args, bun.In(stringsToUpper(params.MeterType)))
+	}
+
+	if params.Region != "" {
+		queryBuilder.WriteString(` AND LOWER(d.region) = ?`)
+		args = append(args, strings.ToLower(params.Region))
+	}
+
+	if params.District != "" {
+		queryBuilder.WriteString(` AND LOWER(d.district) = ?`)
+		args = append(args, strings.ToLower(params.District))
+	}
+
+	// Close second UNION and start third
+	queryBuilder.WriteString(`
+            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station, 
+                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name, 
+                     m.ic_og, DATE(mcd.consumption_date)
+            
+            UNION ALL
+            
+            -- Fallback 2: Region name matching (if district doesn't match but region does)
+            SELECT 
+                d.district,
+                d.region,
+                m.meter_type,
+                m.meter_number,
+                m.location,
+                m.station,
+                m.feeder_panel_name,
+                m.boundary_metering_point,
+                m.voltage_kv,
+                m.ic_og,
+                DATE(mcd.consumption_date) as consumption_date,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_import_kwh,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh,
+                'region_name' as match_type
+            FROM app.dbo_ecg d
+            INNER JOIN app.meters m 
+                ON LOWER(TRIM(d.region)) = LOWER(TRIM(m.region))
+                AND m.district IS NULL  -- Only meters with NULL district
+            LEFT JOIN app.meter_consumption_daily mcd 
+                ON m.meter_number = mcd.meter_number
+                AND mcd.consumption_date BETWEEN ? AND ?
+            LEFT JOIN app.data_item_mapping dim 
+                ON mcd.data_item_id = dim.data_item_id
+            WHERE d.district IS NOT NULL
+                AND d.region IS NOT NULL
+                AND m.meter_type IS NOT NULL
+                AND m.region IS NOT NULL
+    `)
+
+	// Add date parameters for third UNION
+	args = append(args, params.DateFrom, params.DateTo)
+
+	// Add filters for third UNION
+	if len(params.MeterType) > 0 {
+		queryBuilder.WriteString(` AND m.meter_type IN (?)`)
+		args = append(args, bun.In(stringsToUpper(params.MeterType)))
+	}
+
+	if params.Region != "" {
+		queryBuilder.WriteString(` AND LOWER(d.region) = ?`)
+		args = append(args, strings.ToLower(params.Region))
+	}
+
+	if params.District != "" {
+		queryBuilder.WriteString(` AND LOWER(d.district) = ?`)
+		args = append(args, strings.ToLower(params.District))
+	}
+
+	// Close the CTE and add final SELECT
+	queryBuilder.WriteString(`
+            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station, 
+                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name, 
+                     m.ic_og, DATE(mcd.consumption_date)
+        )
+        SELECT 
+            district,
+            region,
+            meter_type,
+            meter_number,
+            location,
+            station,
+            feeder_panel_name,
+            boundary_metering_point,
+            voltage_kv,
+            ic_og,
+            consumption_date,
+            total_import_kwh,
+            total_export_kwh
+        FROM district_consumption
+        ORDER BY district, meter_type, consumption_date
+    `)
+
+	// Execute query - use the variable name you declared
+	q := s.db.NewRaw(queryBuilder.String(), args...)
+
+	var consumptionRows []struct {
+		District              string    `bun:"district"`
+		Region                string    `bun:"region"`
+		MeterType             string    `bun:"meter_type"`
+		MeterNumber           string    `bun:"meter_number"`
+		Station               string    `bun:"station"`
+		Location              string    `bun:"location"`
+		FeederPanelName       string    `bun:"feeder_panel_name"`
+		BoundaryMeteringPoint string    `bun:"boundary_metering_point"`
+		VoltageKV             string    `bun:"voltage_kv"`
+		IC_OG                 string    `bun:"ic_og"`
+		ConsumptionDate       time.Time `bun:"consumption_date"`
+		TotalImportKWh        float64   `bun:"total_import_kwh"`
+		TotalExportKWh        float64   `bun:"total_export_kwh"`
+	}
+
+	// Use 'q' not 'q1'
+	if err := q.Scan(ctx, &consumptionRows); err != nil {
+		return nil, fmt.Errorf("failed to query consumption data: %w", err)
+	}
+
+	// Organize consumption data by district and meter type
+	consumptionMap := make(map[string]map[string][]models.DistrictMapConsumptionByType)
+
+	for _, row := range consumptionRows {
+		districtKey := fmt.Sprintf("%s|%s", row.District, row.Region)
+
+		if _, exists := consumptionMap[districtKey]; !exists {
+			consumptionMap[districtKey] = make(map[string][]models.DistrictMapConsumptionByType)
+		}
+
+		meterTypeKey := row.MeterType
+		if _, exists := consumptionMap[districtKey][meterTypeKey]; !exists {
+			consumptionMap[districtKey][meterTypeKey] = []models.DistrictMapConsumptionByType{}
+		}
+
+		consumption := models.DistrictMapConsumptionByType{
+			Date:                  row.ConsumptionDate,
+			MeterType:             row.MeterType,
+			MeterNumber:           row.MeterNumber,
+			Station:               row.Station,
+			VoltageKV:             row.VoltageKV,
+			Location:              row.Location,
+			BoundaryMeteringPoint: row.BoundaryMeteringPoint,
+			FeederPanelName:       row.FeederPanelName,
+			IC_OG:                 row.IC_OG,
+			TotalImportKWh:        row.TotalImportKWh,
+			TotalExportKWh:        row.TotalExportKWh,
+			NetConsumptionKWh:     row.TotalImportKWh - row.TotalExportKWh,
+		}
+
+		consumptionMap[districtKey][meterTypeKey] = append(
+			consumptionMap[districtKey][meterTypeKey],
+			consumption,
+		)
+	}
+
+	// Build final response
+	districts := make([]models.DistrictMapData, 0, len(allDistricts))
+
+	for _, districtInfo := range allDistricts {
+		districtKey := fmt.Sprintf("%s|%s", districtInfo.District, districtInfo.Region)
+
+		// Transform GeoJSON to Feature format
+		featureGeoJSON := transformToFeatureGeoJSON(districtInfo.GeoJSON, districtInfo.District, districtInfo.Region)
+
+		// Get consumption for this district
+		districtConsumption := consumptionMap[districtKey]
+
+		// Flatten consumption by meter type into single timeseries array
+		var allTimeseries []models.DistrictMapConsumptionByType
+
+		for _, timeseries := range districtConsumption {
+			allTimeseries = append(allTimeseries, timeseries...)
+		}
+
+		// Sort timeseries by date and meter type
+		sort.Slice(allTimeseries, func(i, j int) bool {
+			if allTimeseries[i].Date.Equal(allTimeseries[j].Date) {
+				return allTimeseries[i].MeterType < allTimeseries[j].MeterType
+			}
+			return allTimeseries[i].Date.Before(allTimeseries[j].Date)
+		})
+
+		// Create district data
+		districtData := models.DistrictMapData{
+			District:   districtInfo.District,
+			Region:     districtInfo.Region,
+			GeoJSON:    featureGeoJSON,
+			Timeseries: allTimeseries,
+		}
+
+		districts = append(districts, districtData)
+	}
+
+	// Sort districts by name
+	sort.Slice(districts, func(i, j int) bool {
+		return districts[i].District < districts[j].District
+	})
+
+	return &models.RegionalMapResponse{
+		Districts: districts,
+	}, nil
+}
+
+// Helper function to transform raw GeoJSON to Feature format
+func transformToFeatureGeoJSON(rawGeoJSON json.RawMessage, district, region string) json.RawMessage {
+	type Geometry struct {
+		Type        string        `json:"type"`
+		Coordinates [][][]float64 `json:"coordinates"`
+	}
+
+	type FeatureProperties struct {
+		Name   string `json:"name"`
+		Region string `json:"region"`
+	}
+
+	type Feature struct {
+		Type       string            `json:"type"`
+		Properties FeatureProperties `json:"properties"`
+		Geometry   Geometry          `json:"geometry"`
+	}
+
+	// Parse the raw geometry
+	var geometry Geometry
+	if err := json.Unmarshal(rawGeoJSON, &geometry); err != nil {
+		// If parsing fails, return empty feature
+		geometry = Geometry{
+			Type:        "Polygon",
+			Coordinates: [][][]float64{},
+		}
+	}
+
+	feature := Feature{
+		Type: "Feature",
+		Properties: FeatureProperties{
+			Name:   district,
+			Region: region,
+		},
+		Geometry: geometry,
+	}
+
+	featureJSON, _ := json.Marshal(feature)
+	return featureJSON
+}
+
+// Helper to generate time points
+func generateTimePoints(from, to time.Time, interval string) []string {
+	var timePoints []string
+
+	current := from
+	for !current.After(to) {
+		timePoints = append(timePoints, current.Format("2006-01-02"))
+
+		switch interval {
+		case "daily":
+			current = current.AddDate(0, 0, 1)
+		case "weekly":
+			current = current.AddDate(0, 0, 7)
+		case "monthly":
+			current = current.AddDate(0, 1, 0)
+		default:
+			current = current.AddDate(0, 0, 1)
+		}
+	}
+
+	return timePoints
+}
+
+// GetDistrictGeometries returns simplified district boundaries for mapping
+func (s *MeterService) GetDistrictGeometries(
+	ctx context.Context,
+	regions []string,
+	districts []string,
+) (*models.DistrictGeometryResponse, error) {
+
+	// Get the latest boundary update date for versioning
+	var versionDate time.Time
+	err := s.db.NewSelect().
+		ColumnExpr("MAX(updated_at) as max_date").
+		TableExpr("app.dbo_ecg").
+		Scan(ctx, &versionDate)
+	if err != nil {
+		versionDate = time.Now() // Fallback to current date
+	}
+
+	version := versionDate.Format("2006-01-02")
+
+	// Build query for simplified geometries
+	q := s.db.NewSelect().
+		ColumnExpr("d.district").
+		ColumnExpr("d.region").
+		ColumnExpr("ST_Y(ST_Centroid(d.the_geom)) as center_lat").
+		ColumnExpr("ST_X(ST_Centroid(d.the_geom)) as center_lng").
+		ColumnExpr(`
+            jsonb_build_object(
+                'type', 'Feature',
+                'properties', jsonb_build_object(
+                    'district', d.district,
+                    'region', d.region
+                ),
+                'geometry', ST_AsGeoJSON(
+                    ST_SimplifyPreserveTopology(d.the_geom, 0.001) -- Simplify to ~111m tolerance
+                )::jsonb
+            ) as geojson
+        `).
+		TableExpr("app.dbo_ecg d").
+		Where("d.district IS NOT NULL").
+		Where("d.region IS NOT NULL").
+		OrderExpr("d.region, d.district")
+
+	// Apply region filter
+	if len(regions) > 0 {
+		lowerRegions := stringsToLower(regions)
+		q = q.Where("LOWER(d.region) IN (?)", bun.In(lowerRegions))
+	}
+
+	// Apply district filter
+	if len(districts) > 0 {
+		lowerDistricts := stringsToLower(districts)
+		q = q.Where("LOWER(d.district) IN (?)", bun.In(lowerDistricts))
+	}
+
+	var geometries []models.DistrictGeometry
+	if err := q.Scan(ctx, &geometries); err != nil {
+		return nil, fmt.Errorf("failed to get district geometries: %w", err)
+	}
+
+	// Round coordinates for optimization
+	for i := range geometries {
+		geometries[i].CenterLat = roundCoordinate(geometries[i].CenterLat, 6)
+		geometries[i].CenterLng = roundCoordinate(geometries[i].CenterLng, 6)
+		geometries[i].GeoJSON = simplifyGeoJSONCoordinates(geometries[i].GeoJSON, 6)
+	}
+
+	return &models.DistrictGeometryResponse{
+		Version:   version,
+		Districts: geometries,
+	}, nil
+}
+
+// GetDistrictTimeseriesConsumption returns aggregated consumption by district
+func (s *MeterService) GetDistrictTimeseriesConsumption(
+	ctx context.Context,
+	params models.DistrictConsumptionParams,
+) (*models.DistrictTimeseriesResponse, error) {
+
+	// Build the query for aggregated district consumption
+	var queryBuilder strings.Builder
+	var args []interface{}
+
+	queryBuilder.WriteString(`
+        WITH district_meters AS (
+            -- Match meters to districts using multiple strategies
+            SELECT DISTINCT
+                COALESCE(
+                    d_spatial.district,
+                    d_name.district,
+                    'Unknown District'
+                ) as district,
+                COALESCE(
+                    d_spatial.region,
+                    d_name.region,
+                    m.region,
+                    'Unknown Region'
+                ) as region,
+                m.meter_number
+            FROM app.meters m
+            -- Try spatial join first
+            LEFT JOIN app.dbo_ecg d_spatial 
+                ON ST_Intersects(d_spatial.the_geom, ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326))
+                AND m.latitude IS NOT NULL 
+                AND m.longitude IS NOT NULL
+            -- Fallback to name matching
+            LEFT JOIN app.dbo_ecg d_name 
+                ON LOWER(TRIM(d_name.district)) = LOWER(TRIM(m.district))
+                AND LOWER(TRIM(d_name.region)) = LOWER(TRIM(m.region))
+            WHERE m.meter_type IS NOT NULL
+    `)
+
+	// Apply meter type filter
+	if len(params.MeterType) > 0 {
+		queryBuilder.WriteString(` AND m.meter_type IN (?)`)
+		args = append(args, bun.In(stringsToUpper(params.MeterType)))
+	}
+
+	// Apply region filter (on meter table)
+	if len(params.Region) > 0 {
+		lowerRegions := stringsToLower(params.Region)
+		queryBuilder.WriteString(` AND LOWER(m.region) IN (?)`)
+		args = append(args, bun.In(lowerRegions))
+	}
+
+	// Apply district filter (on meter table)
+	if len(params.District) > 0 {
+		lowerDistricts := stringsToLower(params.District)
+		queryBuilder.WriteString(` AND LOWER(m.district) IN (?)`)
+		args = append(args, bun.In(lowerDistricts))
+	}
+
+	queryBuilder.WriteString(`
+        ),
+        consumption_data AS (
+            SELECT
+                dm.district,
+                dm.region,
+                DATE(mcd.consumption_date) as timestamp,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_import_kwh,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh
+            FROM district_meters dm
+            INNER JOIN app.meter_consumption_daily mcd 
+                ON dm.meter_number = mcd.meter_number
+                AND mcd.consumption_date BETWEEN ? AND ?
+            LEFT JOIN app.data_item_mapping dim 
+                ON mcd.data_item_id = dim.data_item_id
+            GROUP BY dm.district, dm.region, DATE(mcd.consumption_date)
+        )
+        SELECT 
+            district,
+            region,
+            timestamp,
+            total_import_kwh,
+            total_export_kwh
+        FROM consumption_data
+        ORDER BY region, district, timestamp
+    `)
+
+	// Add date parameters
+	args = append(args, params.DateFrom, params.DateTo)
+
+	q := s.db.NewRaw(queryBuilder.String(), args...)
+
+	var rawRows []struct {
+		District       string    `bun:"district"`
+		Region         string    `bun:"region"`
+		Timestamp      time.Time `bun:"timestamp"`
+		TotalImportKWh float64   `bun:"total_import_kwh"`
+		TotalExportKWh float64   `bun:"total_export_kwh"`
+	}
+
+	if err := q.Scan(ctx, &rawRows); err != nil {
+		return nil, fmt.Errorf("failed to query district timeseries: %w", err)
+	}
+
+	// Group data by district
+	districtMap := make(map[string]*models.DistrictTimeseriesData)
+
+	for _, row := range rawRows {
+		districtKey := fmt.Sprintf("%s|%s", row.District, row.Region)
+
+		if _, exists := districtMap[districtKey]; !exists {
+			districtMap[districtKey] = &models.DistrictTimeseriesData{
+				District:   row.District,
+				Region:     row.Region,
+				Timeseries: []models.DistrictTimeseriesEntry{},
+			}
+		}
+
+		entry := models.DistrictTimeseriesEntry{
+			Timestamp:         row.Timestamp,
+			TotalImportKWh:    row.TotalImportKWh,
+			TotalExportKWh:    row.TotalExportKWh,
+			NetConsumptionKWh: row.TotalImportKWh - row.TotalExportKWh,
+		}
+
+		districtMap[districtKey].Timeseries = append(
+			districtMap[districtKey].Timeseries,
+			entry,
+		)
+	}
+
+	// Convert map to slice
+	districts := make([]models.DistrictTimeseriesData, 0, len(districtMap))
+	for _, district := range districtMap {
+		districts = append(districts, *district)
+	}
+
+	// Sort by region, then district
+	sort.Slice(districts, func(i, j int) bool {
+		if districts[i].Region != districts[j].Region {
+			return districts[i].Region < districts[j].Region
+		}
+		return districts[i].District < districts[j].District
+	})
+
+	return &models.DistrictTimeseriesResponse{
+		Districts: districts,
+	}, nil
+}
+
+// Helper function to round coordinates
+func roundCoordinate(value float64, precision int) float64 {
+	multiplier := math.Pow(10, float64(precision))
+	return math.Round(value*multiplier) / multiplier
+}
+
+// Helper function to simplify GeoJSON coordinates
+func simplifyGeoJSONCoordinates(geojson json.RawMessage, precision int) json.RawMessage {
+	type Geometry struct {
+		Type        string        `json:"type"`
+		Coordinates [][][]float64 `json:"coordinates"`
+	}
+
+	type Feature struct {
+		Type       string                 `json:"type"`
+		Properties map[string]interface{} `json:"properties"`
+		Geometry   Geometry               `json:"geometry"`
+	}
+
+	var feature Feature
+	if err := json.Unmarshal(geojson, &feature); err != nil {
+		return geojson // Return original if parsing fails
+	}
+
+	// Round all coordinates
+	for i := range feature.Geometry.Coordinates {
+		for j := range feature.Geometry.Coordinates[i] {
+			for k := range feature.Geometry.Coordinates[i][j] {
+				feature.Geometry.Coordinates[i][j][k] = roundCoordinate(
+					feature.Geometry.Coordinates[i][j][k],
+					precision,
+				)
+			}
+		}
+	}
+
+	// Simplify polygon if too many points
+	if len(feature.Geometry.Coordinates) > 0 && len(feature.Geometry.Coordinates[0]) > 100 {
+		// Keep every nth point to reduce to ~50-100 points
+		n := len(feature.Geometry.Coordinates[0]) / 80
+		if n < 1 {
+			n = 1
+		}
+
+		var simplified [][]float64
+		for i := 0; i < len(feature.Geometry.Coordinates[0]); i += n {
+			simplified = append(simplified, feature.Geometry.Coordinates[0][i])
+		}
+		// Ensure polygon is closed (first == last)
+		if len(simplified) > 0 && !pointsEqual(simplified[0], simplified[len(simplified)-1]) {
+			simplified = append(simplified, simplified[0])
+		}
+		feature.Geometry.Coordinates = [][][]float64{simplified}
+	}
+
+	simplifiedJSON, _ := json.Marshal(feature)
+	return simplifiedJSON
+}
+
+func pointsEqual(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 ///HELPER

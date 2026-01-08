@@ -435,3 +435,166 @@ type MeterTypeConsumers struct {
 	TopExportConsumer    *MeterConsumption `json:"top_export_consumer"`
 	BottomExportConsumer *MeterConsumption `json:"bottom_export_consumer"`
 }
+
+// MeterHealthSummary represents overall meter health statistics
+type MeterHealthSummary struct {
+	TotalMeters             int                      `json:"total_meters"`
+	OnlineMeters            int                      `json:"online_meters"`
+	OfflineMeters           int                      `json:"offline_meters"`
+	HealthPercentage        float64                  `json:"health_percentage"`
+	AverageUptimePercentage float64                  `json:"average_uptime_percentage"`
+	ByMeterType             []MeterHealthByMeterType `json:"by_meter_type,omitempty"`
+	UptimeDistribution      MeterUptimeDistribution  `json:"uptime_distribution"`
+}
+
+// MeterHealthByMeterType represents health stats per meter type
+type MeterHealthByMeterType struct {
+	MeterType string  `bun:"meter_type" json:"meter_type"`
+	Total     int     `bun:"total" json:"total"`
+	Online    int     `bun:"online" json:"online"`
+	Offline   int     `bun:"offline" json:"offline"`
+	AvgUptime float64 `bun:"avg_uptime" json:"avg_uptime"`
+}
+
+// MeterUptimeDistribution represents uptime categories
+type MeterUptimeDistribution struct {
+	Excellent int `json:"excellent"` // >95% uptime
+	Good      int `json:"good"`      // 80-95%
+	Poor      int `json:"poor"`      // 60-80%
+	Critical  int `json:"critical"`  // <60%
+}
+
+// MeterHealthDetailParams for filtering and pagination
+type MeterHealthDetailParams struct {
+	ReadingFilterParams
+	Page           int
+	Limit          int
+	Search         string
+	HealthCategory string // "excellent", "good", "poor", "critical", "online", "offline"
+	SortBy         string // "meter_number", "uptime", "meter_type", "last_seen"
+	SortOrder      string
+}
+
+// MeterHealthDetailRecord represents a single meter's health details
+type MeterHealthDetailRecord struct {
+	MeterNumber             string     `bun:"meter_number" json:"meter_number"`
+	MeterType               *string    `bun:"meter_type" json:"meter_type"`
+	Region                  string     `bun:"region" json:"region,omitempty"`
+	District                string     `bun:"district" json:"district,omitempty"`
+	Station                 *string    `bun:"station" json:"station,omitempty"`
+	FeederPanelName         *string    `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
+	Location                string     `bun:"location" json:"location,omitempty"`
+	VoltageKv               string     `bun:"voltage_kv" json:"voltage_kv,omitempty"`
+	BoundaryPoint           *string    `bun:"boundary_metering_point" json:"boundary_metering_point,omitempty"`
+	Status                  string     `bun:"status" json:"status"`                   // "ONLINE" or "OFFLINE"
+	HealthCategory          string     `bun:"health_category" json:"health_category"` // "excellent", "good", "poor", "critical"
+	UptimePercentage        float64    `bun:"uptime_percentage" json:"uptime_percentage"`
+	DaysOnline              int        `bun:"days_online" json:"days_online"`
+	DaysOffline             int        `bun:"days_offline" json:"days_offline"`
+	TotalDays               int        `bun:"total_days" json:"total_days"`
+	LastSeenDate            *time.Time `bun:"last_seen_date" json:"last_seen_date"`
+	TotalConsumptionKWh     float64    `bun:"total_consumption_kwh" json:"total_consumption_kwh"`
+	AverageDailyConsumption float64    `bun:"avg_daily_consumption" json:"avg_daily_consumption"`
+}
+
+// MeterHealthDetailResponse represents paginated health detail response
+type MeterHealthDetailResponse struct {
+	Data       []MeterHealthDetailRecord `json:"data"`
+	Pagination struct {
+		Page         int  `json:"page"`
+		Limit        int  `json:"limit"`
+		TotalRecords int  `json:"total_records"`
+		TotalPages   int  `json:"total_pages"`
+		HasMore      bool `json:"has_more"`
+	} `json:"pagination"`
+	Summary struct {
+		HealthCategory string  `json:"health_category,omitempty"`
+		AverageUptime  float64 `json:"average_uptime"`
+		TotalOnline    int     `json:"total_online"`
+		TotalOffline   int     `json:"total_offline"`
+	} `json:"summary"`
+	FiltersApplied map[string]interface{} `json:"filters_applied"`
+}
+
+// RegionalMapParams for filtering regional map data
+type RegionalMapParams struct {
+	DateFrom  time.Time
+	DateTo    time.Time
+	MeterType []string
+	Region    string
+	District  string
+	Location  string
+}
+
+// DistrictMapConsumption represents consumption for a district on a specific date
+type DistrictMapConsumptionByType struct {
+	Date                  time.Time `bun:"consumption_date" json:"date"`
+	MeterType             string    `bun:"meter_type" json:"meter_type"`
+	MeterNumber           string    `bun:"meter_number" json:"meter_number"`
+	Station               string    `bun:"station" json:"station,omitempty"`
+	VoltageKV             string    `bun:"voltage_kv" json:"voltage_kv,omitempty"`
+	Location              string    `bun:"location" json:"location,omitempty"`
+	IC_OG                 string    `bun:"ic_og" json:"ic_og,omitempty"`
+	BoundaryMeteringPoint string    `bun:"boundary_metering_point" json:"boundary_metering_point,omitempty"`
+	FeederPanelName       string    `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
+	TotalImportKWh        float64   `bun:"total_import_kwh" json:"total_import_kwh"`
+	TotalExportKWh        float64   `bun:"total_export_kwh" json:"total_export_kwh"`
+	NetConsumptionKWh     float64   `json:"net_consumption_kwh"`
+}
+
+// DistrictMapData represents a district with its GeoJSON and consumption timeseries
+type DistrictMapData struct {
+	District   string                         `bun:"district" json:"district"`
+	Region     string                         `bun:"region" json:"region"`
+	GeoJSON    json.RawMessage                `bun:"geojson" json:"geojson"`
+	Timeseries []DistrictMapConsumptionByType `json:"timeseries"`
+}
+
+// RegionalMapResponse represents the complete response
+type RegionalMapResponse struct {
+	Districts []DistrictMapData `json:"districts"`
+}
+
+// DistrictGeometry represents simplified district boundary with center point
+type DistrictGeometry struct {
+	District  string          `bun:"district" json:"district"`
+	Region    string          `bun:"region" json:"region"`
+	CenterLat float64         `bun:"center_lat" json:"center_lat"`
+	CenterLng float64         `bun:"center_lng" json:"center_lng"`
+	GeoJSON   json.RawMessage `bun:"geojson" json:"geojson"`
+}
+
+// DistrictGeometryResponse represents the geometry API response
+type DistrictGeometryResponse struct {
+	Version   string             `json:"version"`
+	Districts []DistrictGeometry `json:"districts"`
+}
+
+// DistrictTimeseriesEntry represents daily consumption for a district
+type DistrictTimeseriesEntry struct {
+	Timestamp         time.Time `bun:"timestamp" json:"timestamp"`
+	TotalImportKWh    float64   `bun:"total_import_kwh" json:"total_import_kwh"`
+	TotalExportKWh    float64   `bun:"total_export_kwh" json:"total_export_kwh"`
+	NetConsumptionKWh float64   `json:"net_consumption_kwh"`
+}
+
+// DistrictTimeseriesData represents timeseries for a single district
+type DistrictTimeseriesData struct {
+	District   string                    `bun:"district" json:"district"`
+	Region     string                    `bun:"region" json:"region"`
+	Timeseries []DistrictTimeseriesEntry `json:"timeseries"`
+}
+
+// DistrictTimeseriesResponse represents the timeseries API response
+type DistrictTimeseriesResponse struct {
+	Districts []DistrictTimeseriesData `json:"districts"`
+}
+
+// DistrictConsumptionParams for filtering district consumption
+type DistrictConsumptionParams struct {
+	DateFrom  time.Time
+	DateTo    time.Time
+	MeterType []string
+	Region    []string
+	District  []string
+}

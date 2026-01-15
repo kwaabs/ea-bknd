@@ -598,3 +598,136 @@ type DistrictConsumptionParams struct {
 	Region    []string
 	District  []string
 }
+
+type EnergyBalanceParams struct {
+	DateFrom              time.Time
+	DateTo                time.Time
+	MeterNumber           []string
+	Regions               []string
+	Districts             []string
+	Stations              []string
+	Locations             []string
+	BoundaryMeteringPoint []string
+	MeterTypes            []string // BSP, DTX, REGIONAL_BOUNDARY
+	Voltages              []float64
+}
+
+// BoundaryMeterDetail shows individual boundary meter information
+type BoundaryMeterDetail struct {
+	MeterNumber           string  `json:"meter_number"`
+	BoundaryMeteringPoint string  `json:"boundary_metering_point,omitempty"` // Raw value for reference
+	ConnectedRegion       string  `json:"connected_region,omitempty"`        // Parsed and validated
+	Location              string  `json:"location,omitempty"`
+	VoltageKV             float64 `json:"voltage_kv,omitempty"`
+	ImportKWh             float64 `json:"import_kwh"`
+	ExportKWh             float64 `json:"export_kwh"`
+	NetFlow               float64 `json:"net_flow"` // Positive = net import, Negative = net export
+	ReadingCount          int     `json:"reading_count"`
+	DataQuality           string  `json:"data_quality"` // "complete", "partial", "incomplete"
+}
+
+// InternalConsumptionDetail breaks down internal generation vs distribution
+type InternalConsumptionDetail struct {
+	BSPImport     float64 `json:"bsp_import"`      // Bulk Supply Points
+	DTXImport     float64 `json:"dtx_import"`      // Distribution Transformers
+	NetInternal   float64 `json:"net_internal"`    // BSP - DTX
+	BSPMeterCount int     `json:"bsp_meter_count"` // Coverage indicator
+	DTXMeterCount int     `json:"dtx_meter_count"` // Coverage indicator
+}
+
+// CrossBoundaryFlowDetail provides boundary flow information
+type CrossBoundaryFlowDetail struct {
+	BoundaryMeters          []BoundaryMeterDetail       `json:"boundary_meters"`           // Individual meter details
+	ByConnectedRegion       map[string]RegionFlowDetail `json:"by_connected_region"`       // Aggregated by validated regions only
+	TotalImportKWh          float64                     `json:"total_import_kwh"`          // Total import from boundaries
+	TotalExportKWh          float64                     `json:"total_export_kwh"`          // Total export to boundaries
+	NetCrossBoundaryFlow    float64                     `json:"net_cross_boundary_flow"`   // Net import (positive) or export (negative)
+	BoundaryMeterCount      int                         `json:"boundary_meter_count"`      // Number of boundary meters
+	IsNetImporter           bool                        `json:"is_net_importer"`           // True if net importing
+	CrossBoundaryDependency float64                     `json:"cross_boundary_dependency"` // % of consumption from cross-boundary
+	DominantFlowDirection   string                      `json:"dominant_flow_direction"`
+}
+
+// BalanceAnalysis provides insights into regional energy balance
+type BalanceAnalysis struct {
+	InternalSufficiency   float64  `json:"internal_sufficiency"`    // % of consumption met internally
+	CrossBoundaryReliance float64  `json:"cross_boundary_reliance"` // % reliance on cross-boundary flows
+	BalanceType           string   `json:"balance_type"`            // "self_sufficient", "net_importer", "net_exporter", "balanced"
+	Flags                 []string `json:"flags,omitempty"`         // Notable conditions
+}
+
+// RegionalEnergyBalance represents complete energy balance for a region on a date
+type RegionalEnergyBalance struct {
+	Region              string                    `json:"region"`
+	Date                time.Time                 `json:"date"`
+	InternalConsumption InternalConsumptionDetail `json:"internal_consumption"`
+	CrossBoundaryFlows  CrossBoundaryFlowDetail   `json:"cross_boundary_flows"`
+	TotalNetConsumption float64                   `json:"total_net_consumption"`
+	BalanceAnalysis     BalanceAnalysis           `json:"balance_analysis"`
+}
+
+// EnergyBalanceResponse represents the complete API response
+type EnergyBalanceResponse struct {
+	Data    []RegionalEnergyBalance `json:"data"`
+	Summary struct {
+		DateRange struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		} `json:"date_range"`
+		TotalRegions int `json:"total_regions"`
+		Metrics      struct {
+			TotalBSPImport          float64 `json:"total_bsp_import"`
+			TotalDTXImport          float64 `json:"total_dtx_import"`
+			TotalInternalNet        float64 `json:"total_internal_net"`
+			TotalCrossBoundaryNet   float64 `json:"total_cross_boundary_net"`
+			TotalNetConsumption     float64 `json:"total_net_consumption"`
+			AverageDailyConsumption float64 `json:"average_daily_consumption"`
+		} `json:"metrics"`
+	} `json:"summary"`
+}
+
+// RegionalEnergyBalanceSummary represents aggregated balance by region (all dates combined)
+type RegionalEnergyBalanceSummary struct {
+	Region                  string  `json:"region"`
+	TotalBSPImport          float64 `json:"total_bsp_import"`
+	TotalDTXImport          float64 `json:"total_dtx_import"`
+	TotalInternalNet        float64 `json:"total_internal_net"`
+	TotalCrossBoundaryNet   float64 `json:"total_cross_boundary_net"`
+	TotalNetConsumption     float64 `json:"total_net_consumption"`
+	DayCount                int     `json:"day_count"`
+	AverageDailyConsumption float64 `json:"average_daily_consumption"`
+}
+
+// Updated models with location breakdown
+
+// LocationFlowDetail shows flow details for a specific location
+type LocationFlowDetail struct {
+	Location  string  `json:"location"`
+	ImportKWh float64 `json:"import_kwh"`
+	ExportKWh float64 `json:"export_kwh"`
+	NetFlow   float64 `json:"net_flow"`
+}
+
+// RegionFlowDetail shows aggregated flow with a specific neighboring region
+type RegionFlowDetail struct {
+	ConnectedRegion     string                        `json:"connected_region"`
+	TotalImportFromThem float64                       `json:"total_import_from_them"`
+	TotalExportToThem   float64                       `json:"total_export_to_them"`
+	NetFlow             float64                       `json:"net_flow"`
+	FlowBalance         string                        `json:"flow_balance"` // "importing", "exporting", "balanced"
+	ByLocation          map[string]LocationFlowDetail `json:"by_location"`  // Breakdown by location
+}
+
+// RegionGeometry represents simplified regional boundary with center point
+type RegionGeometry struct {
+	Region    string          `bun:"region" json:"region"`
+	CenterLat float64         `bun:"center_lat" json:"center_lat"`
+	CenterLng float64         `bun:"center_lng" json:"center_lng"`
+	GeoJSON   json.RawMessage `bun:"geojson" json:"geojson"`
+}
+
+// RegionGeometryResponse represents the geometry API response
+type RegionGeometryResponse struct {
+	Version string           `json:"version"`
+	Regions []RegionGeometry `json:"regions"`
+}

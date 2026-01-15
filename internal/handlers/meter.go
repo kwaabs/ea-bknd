@@ -2524,6 +2524,263 @@ func (h *MeterHandler) GetDistrictTimeseriesConsumption(w http.ResponseWriter, r
 	})
 }
 
+// GetRegionalEnergyBalance handles GET /api/energy-balance/regional
+// Updated handler with ALL filters parsed (like GetMeterStatus, GetDailyConsumption)
+
+// GetRegionalEnergyBalance handles GET /api/energy-balance/regional
+// Supports both singular and plural parameter names (e.g., region OR regions)
+func (h *MeterHandler) GetRegionalEnergyBalance(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Helper to get parameter value, trying both singular and plural forms
+	getParam := func(singular, plural string) string {
+		// Try singular first
+		if val := q.Get(singular); val != "" {
+			return val
+		}
+		// Try plural
+		if val := q.Get(plural); val != "" {
+			return val
+		}
+		return ""
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Helper to parse voltages
+	parseVoltages := func(s string) []float64 {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		var voltages []float64
+		for _, p := range parts {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(p), 64); err == nil {
+				voltages = append(voltages, v)
+			}
+		}
+		return voltages
+	}
+
+	// Parse ALL filter parameters (supporting both singular and plural)
+	params := models.EnergyBalanceParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(getParam("meterNumber", "meterNumbers")),
+		Regions:               splitCSV(getParam("region", "regions")),
+		Districts:             splitCSV(getParam("district", "districts")),
+		Stations:              splitCSV(getParam("station", "stations")),
+		Locations:             splitCSV(getParam("location", "locations")),
+		BoundaryMeteringPoint: splitCSV(getParam("boundaryMeteringPoint", "boundaryMeteringPoints")),
+		MeterTypes:            splitCSV(getParam("meterType", "meterTypes")),
+		Voltages:              parseVoltages(getParam("voltage", "voltages")),
+	}
+
+	// Call service
+	response, err := h.service.GetRegionalEnergyBalance(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get regional energy balance", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   "failed to calculate energy balance",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    response.Data,
+		"summary": response.Summary,
+	})
+}
+
+// GetRegionalEnergyBalanceSummary handles GET /api/energy-balance/regional/summary
+// Supports both singular and plural parameter names
+func (h *MeterHandler) GetRegionalEnergyBalanceSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	// Parse and validate dates
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
+		})
+		return
+	}
+
+	// Validate date range
+	if dateTo.Before(dateFrom) {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "dateTo must be after dateFrom",
+		})
+		return
+	}
+
+	// Helper to get parameter value, trying both singular and plural forms
+	getParam := func(singular, plural string) string {
+		// Try singular first
+		if val := q.Get(singular); val != "" {
+			return val
+		}
+		// Try plural
+		if val := q.Get(plural); val != "" {
+			return val
+		}
+		return ""
+	}
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Helper to parse voltages
+	parseVoltages := func(s string) []float64 {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		var voltages []float64
+		for _, p := range parts {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(p), 64); err == nil {
+				voltages = append(voltages, v)
+			}
+		}
+		return voltages
+	}
+
+	// Parse ALL filter parameters (supporting both singular and plural)
+	params := models.EnergyBalanceParams{
+		DateFrom:              dateFrom,
+		DateTo:                dateTo,
+		MeterNumber:           splitCSV(getParam("meterNumber", "meterNumbers")),
+		Regions:               splitCSV(getParam("region", "regions")),
+		Districts:             splitCSV(getParam("district", "districts")),
+		Stations:              splitCSV(getParam("station", "stations")),
+		Locations:             splitCSV(getParam("location", "locations")),
+		BoundaryMeteringPoint: splitCSV(getParam("boundaryMeteringPoint", "boundaryMeteringPoints")),
+		MeterTypes:            splitCSV(getParam("meterType", "meterTypes")),
+		Voltages:              parseVoltages(getParam("voltage", "voltages")),
+	}
+
+	// Call service
+	summaries, err := h.service.GetRegionalEnergyBalanceSummary(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get regional energy balance summary", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   "failed to calculate summary",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    summaries,
+	})
+}
+
+// GetRegionGeometries handles GET /api/regions/geometries
+func (h *MeterHandler) GetRegionGeometries(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+
+	// Helper to split CSV parameters
+	splitCSV := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	// Parse region filter (optional)
+	regions := splitCSV(q.Get("regions"))
+	// Also support singular form
+	if len(regions) == 0 {
+		regions = splitCSV(q.Get("region"))
+	}
+
+	// Call service
+	response, err := h.service.GetRegionGeometries(ctx, regions)
+	if err != nil {
+		h.logr.Error("failed to get region geometries", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   "failed to retrieve region geometries",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"data":    response,
+	})
+}
+
 // --- helper functions ---
 
 func splitCSV(input string) []string {

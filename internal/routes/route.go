@@ -97,6 +97,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 
 			// Geometry endpoints
 			r.Get("/geometries/districts", meterHandler.GetDistrictGeometries)
+			r.Get("/geometries/regions", meterHandler.GetRegionGeometries)
 
 			// Timeseries endpoints
 			r.Get("/consumption/districts-timeseries", meterHandler.GetDistrictTimeseriesConsumption)
@@ -181,6 +182,12 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 			// Get all feedback (paginated)
 			r.Get("/feedback/{id}", feedbackHandler.GetFeedbackByID)               // Get single feedback with replies
 			r.Patch("/feedback/{id}/status", feedbackHandler.UpdateFeedbackStatus) // Update status
+		})
+
+		r.Route("/energy-balance", func(r chi.Router) {
+			// In your router setup, add these routes:
+			r.Get("/regional", meterHandler.GetRegionalEnergyBalance)
+			r.Get("/regional/summary", meterHandler.GetRegionalEnergyBalanceSummary)
 		})
 
 		// ✅ NEW: Service Areas routes

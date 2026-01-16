@@ -981,12 +981,124 @@ func (s *MeterService) GetBSPAggregatedConsumption(
 	return results, nil
 }
 
+//func (s *MeterService) GetFeederAggregatedConsumption(
+//	ctx context.Context,
+//	params models.ReadingFilterParams,
+//	groupBy string,
+//	additionalGroups []string,
+//	meterTypes []string, // New parameter to specify meter types
+//) ([]models.AggregatedConsumptionResult, error) {
+//
+//	var results []models.AggregatedConsumptionResult
+//	filters := buildReadingFilters(params)
+//
+//	// Validate and set default meter types if none provided
+//	if len(meterTypes) == 0 {
+//		meterTypes = []string{"BSP", "PSS", "SS"} // Default to all types
+//	}
+//
+//	q := s.db.NewSelect().
+//		TableExpr("app.meter_consumption_daily AS mcd").
+//		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+//		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+//		ColumnExpr("dim.system_name AS system_name").
+//		ColumnExpr("mtr.station AS station").
+//		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+//		ColumnExpr("mtr.ic_og AS ic_og").
+//		ColumnExpr("mtr.meter_type AS meter_type"). // Include meter_type in results
+//		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+//		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+//		Where("mtr.meter_type IN (?)", bun.In(meterTypes)) // Use IN clause for multiple types
+//
+//	// --- Subquery 1: total_meter_count (filtered) ---
+//	subQFiltered := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr2").
+//		Join("JOIN app.meter_consumption_daily AS mcd2 ON mcd2.meter_number = mtr2.meter_number").
+//		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+//		Where("mtr2.meter_type IN (?)", bun.In(meterTypes))
+//
+//	for _, f := range filters {
+//		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
+//		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
+//		if strings.Contains(strings.ToLower(qry), "meter_type") {
+//			continue
+//		}
+//		subQFiltered = subQFiltered.Where(qry, f.Args...)
+//	}
+//
+//	q = q.ColumnExpr("(?) AS total_meter_count", subQFiltered)
+//
+//	// --- Subquery 2: all_meters_count (unfiltered by specified types) ---
+//	subQAll := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr3").
+//		ColumnExpr("COUNT(DISTINCT mtr3.meter_number)").
+//		Where("mtr3.meter_type IN (?)", bun.In(meterTypes))
+//
+//	q = q.ColumnExpr("(?) AS all_meters_count", subQAll)
+//
+//	// --- Time grouping ---
+//	groupCols := []bun.Safe{
+//		bun.Safe("dim.system_name"),
+//		bun.Safe("mtr.station"),
+//		bun.Safe("mtr.feeder_panel_name"),
+//		bun.Safe("mtr.ic_og"),
+//		bun.Safe("mtr.meter_type"), // Include meter_type in grouping
+//	}
+//
+//	switch groupBy {
+//	case "day":
+//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+//	case "month":
+//		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+//	case "year":
+//		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+//	default:
+//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+//	}
+//
+//	// --- Additional grouping ---
+//	for _, g := range additionalGroups {
+//		col := fmt.Sprintf("mtr.%s", g)
+//		if g != "meter_type" {
+//			col = fmt.Sprintf("LOWER(mtr.%s)", g)
+//		}
+//		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+//		groupCols = append(groupCols, bun.Safe(col))
+//	}
+//
+//	// --- Apply filters (skip meter_type override) ---
+//	for _, f := range filters {
+//		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+//			continue
+//		}
+//		q = q.Where(f.Query, f.Args...)
+//	}
+//
+//	// --- Group by all relevant columns ---
+//	for _, g := range groupCols {
+//		q = q.GroupExpr(string(g))
+//	}
+//
+//	// Optional: Order by meter_type for consistent results
+//	q = q.OrderExpr("mtr.meter_type", "group_period")
+//
+//	if err := q.Scan(ctx, &results); err != nil {
+//		return nil, err
+//	}
+//
+//	return results, nil
+//}
+
 func (s *MeterService) GetFeederAggregatedConsumption(
 	ctx context.Context,
 	params models.ReadingFilterParams,
 	groupBy string,
 	additionalGroups []string,
-	meterTypes []string, // New parameter to specify meter types
+	meterTypes []string,
 ) ([]models.AggregatedConsumptionResult, error) {
 
 	var results []models.AggregatedConsumptionResult
@@ -994,23 +1106,13 @@ func (s *MeterService) GetFeederAggregatedConsumption(
 
 	// Validate and set default meter types if none provided
 	if len(meterTypes) == 0 {
-		meterTypes = []string{"BSP", "PSS", "SS"} // Default to all types
+		meterTypes = []string{"BSP", "PSS", "SS"}
 	}
 
-	q := s.db.NewSelect().
-		TableExpr("app.meter_consumption_daily AS mcd").
-		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
-		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
-		ColumnExpr("dim.system_name AS system_name").
-		ColumnExpr("mtr.station AS station").
-		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
-		ColumnExpr("mtr.ic_og AS ic_og").
-		ColumnExpr("mtr.meter_type AS meter_type"). // Include meter_type in results
-		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
-		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
-		Where("mtr.meter_type IN (?)", bun.In(meterTypes)) // Use IN clause for multiple types
+	// --- Calculate counts ONCE ---
+	var totalMeterCount, allMetersCount int64
 
-	// --- Subquery 1: total_meter_count (filtered) ---
+	// total_meter_count: meters with consumption in date range
 	subQFiltered := s.db.NewSelect().
 		TableExpr("app.meters AS mtr2").
 		Join("JOIN app.meter_consumption_daily AS mcd2 ON mcd2.meter_number = mtr2.meter_number").
@@ -1018,31 +1120,49 @@ func (s *MeterService) GetFeederAggregatedConsumption(
 		Where("mtr2.meter_type IN (?)", bun.In(meterTypes))
 
 	for _, f := range filters {
-		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
-		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
-		if strings.Contains(strings.ToLower(qry), "meter_type") {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
 			continue
 		}
+		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
+		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
 		subQFiltered = subQFiltered.Where(qry, f.Args...)
 	}
 
-	q = q.ColumnExpr("(?) AS total_meter_count", subQFiltered)
+	if err := subQFiltered.Scan(ctx, &totalMeterCount); err != nil {
+		return nil, err
+	}
 
-	// --- Subquery 2: all_meters_count (unfiltered by specified types) ---
-	subQAll := s.db.NewSelect().
-		TableExpr("app.meters AS mtr3").
-		ColumnExpr("COUNT(DISTINCT mtr3.meter_number)").
-		Where("mtr3.meter_type IN (?)", bun.In(meterTypes))
+	// all_meters_count: all meters of specified types (no date filter, no join needed)
+	if err := s.db.NewSelect().
+		TableExpr("app.meters").
+		ColumnExpr("COUNT(DISTINCT meter_number)").
+		Where("meter_type IN (?)", bun.In(meterTypes)).
+		Scan(ctx, &allMetersCount); err != nil {
+		return nil, err
+	}
 
-	q = q.ColumnExpr("(?) AS all_meters_count", subQAll)
+	// --- Main query ---
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+		ColumnExpr("mtr.ic_og AS ic_og").
+		ColumnExpr("mtr.meter_type AS meter_type").
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+		ColumnExpr("? AS total_meter_count", totalMeterCount).
+		ColumnExpr("? AS all_meters_count", allMetersCount).
+		Where("mtr.meter_type IN (?)", bun.In(meterTypes))
 
 	// --- Time grouping ---
 	groupCols := []bun.Safe{
 		bun.Safe("dim.system_name"),
-		bun.Safe("mtr.station"),
+
 		bun.Safe("mtr.feeder_panel_name"),
 		bun.Safe("mtr.ic_og"),
-		bun.Safe("mtr.meter_type"), // Include meter_type in grouping
+		bun.Safe("mtr.meter_type"),
 	}
 
 	switch groupBy {
@@ -1060,17 +1180,17 @@ func (s *MeterService) GetFeederAggregatedConsumption(
 		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
 	}
 
-	// --- Additional grouping ---
+	// --- Additional grouping (skip meter_type if already included) ---
 	for _, g := range additionalGroups {
-		col := fmt.Sprintf("mtr.%s", g)
-		if g != "meter_type" {
-			col = fmt.Sprintf("LOWER(mtr.%s)", g)
+		if g == "meter_type" {
+			continue // Already in groupCols
 		}
+		col := fmt.Sprintf("LOWER(mtr.%s)", g)
 		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
 		groupCols = append(groupCols, bun.Safe(col))
 	}
 
-	// --- Apply filters (skip meter_type override) ---
+	// --- Apply filters ---
 	for _, f := range filters {
 		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
 			continue
@@ -1078,13 +1198,12 @@ func (s *MeterService) GetFeederAggregatedConsumption(
 		q = q.Where(f.Query, f.Args...)
 	}
 
-	// --- Group by all relevant columns ---
+	// --- Group by ---
 	for _, g := range groupCols {
 		q = q.GroupExpr(string(g))
 	}
 
-	// Optional: Order by meter_type for consistent results
-	q = q.OrderExpr("mtr.meter_type", "group_period")
+	q = q.OrderExpr("mtr.meter_type, group_period")
 
 	if err := q.Scan(ctx, &results); err != nil {
 		return nil, err
@@ -3900,6 +4019,680 @@ func (s *MeterService) GetRegionalMapConsumption(
 	}, nil
 }
 
+// GetRegionalEnergyBalance calculates energy balance with ALL filters properly applied
+func (s *MeterService) GetRegionalEnergyBalance(
+	ctx context.Context,
+	params models.EnergyBalanceParams,
+) (*models.EnergyBalanceResponse, error) {
+
+	// Validate date range
+	if params.DateFrom.IsZero() || params.DateTo.IsZero() {
+		return nil, fmt.Errorf("date_from and date_to are required")
+	}
+
+	// Build filters for internal consumption (BSP/DTX)
+	var internalConditions []string
+	var internalArgs []interface{}
+
+	// Date range (always required)
+	internalConditions = append(internalConditions, "DATE(mcd.consumption_date) BETWEEN ? AND ?")
+	internalArgs = append(internalArgs, params.DateFrom, params.DateTo)
+
+	// Region filter
+	if len(params.Regions) > 0 {
+		placeholders := make([]string, len(params.Regions))
+		for i := range params.Regions {
+			placeholders[i] = "?"
+		}
+		internalConditions = append(internalConditions, "LOWER(m.region) IN ("+strings.Join(placeholders, ",")+")")
+		for _, r := range stringsToLower(params.Regions) {
+			internalArgs = append(internalArgs, r)
+		}
+	}
+
+	// District filter
+	if len(params.Districts) > 0 {
+		placeholders := make([]string, len(params.Districts))
+		for i := range params.Districts {
+			placeholders[i] = "?"
+		}
+		internalConditions = append(internalConditions, "LOWER(m.district) IN ("+strings.Join(placeholders, ",")+")")
+		for _, d := range stringsToLower(params.Districts) {
+			internalArgs = append(internalArgs, d)
+		}
+	}
+
+	// Station filter
+	if len(params.Stations) > 0 {
+		placeholders := make([]string, len(params.Stations))
+		for i := range params.Stations {
+			placeholders[i] = "?"
+		}
+		internalConditions = append(internalConditions, "LOWER(m.station) IN ("+strings.Join(placeholders, ",")+")")
+		for _, st := range stringsToLower(params.Stations) {
+			internalArgs = append(internalArgs, st)
+		}
+	}
+
+	// Location filter
+	if len(params.Locations) > 0 {
+		placeholders := make([]string, len(params.Locations))
+		for i := range params.Locations {
+			placeholders[i] = "?"
+		}
+		internalConditions = append(internalConditions, "LOWER(m.location) IN ("+strings.Join(placeholders, ",")+")")
+		for _, l := range stringsToLower(params.Locations) {
+			internalArgs = append(internalArgs, l)
+		}
+	}
+
+	// Meter number filter
+	if len(params.MeterNumber) > 0 {
+		placeholders := make([]string, len(params.MeterNumber))
+		for i := range params.MeterNumber {
+			placeholders[i] = "?"
+		}
+		internalConditions = append(internalConditions, "m.meter_number IN ("+strings.Join(placeholders, ",")+")")
+		for _, mn := range params.MeterNumber {
+			internalArgs = append(internalArgs, mn)
+		}
+	}
+
+	// Meter type filter (for BSP/DTX only)
+	meterTypeFilter := "m.meter_type IN ('BSP', 'DTX')"
+	if len(params.MeterTypes) > 0 {
+		// Only allow BSP/DTX for internal consumption
+		validTypes := []string{}
+		for _, mt := range params.MeterTypes {
+			upperType := strings.ToUpper(mt)
+			if upperType == "BSP" || upperType == "DTX" {
+				validTypes = append(validTypes, upperType)
+			}
+		}
+		if len(validTypes) > 0 {
+			placeholders := make([]string, len(validTypes))
+			for i := range validTypes {
+				placeholders[i] = "?"
+			}
+			meterTypeFilter = "m.meter_type IN (" + strings.Join(placeholders, ",") + ")"
+			for _, vt := range validTypes {
+				internalArgs = append(internalArgs, vt)
+			}
+		} else {
+			// If they filtered for only REGIONAL_BOUNDARY, no internal consumption
+			meterTypeFilter = "1 = 0" // Return empty
+		}
+	}
+
+	// Voltage filter
+	if len(params.Voltages) > 0 {
+		placeholders := make([]string, len(params.Voltages))
+		for i := range params.Voltages {
+			placeholders[i] = "?"
+		}
+		internalConditions = append(internalConditions, "m.voltage_kv IN ("+strings.Join(placeholders, ",")+")")
+		for _, v := range params.Voltages {
+			internalArgs = append(internalArgs, v)
+		}
+	}
+
+	// Build WHERE clause for internal consumption
+	internalWhereClause := meterTypeFilter + " AND mcd.data_item_id != 'NO_DATA' AND di.system_name = 'import_kwh'"
+	if len(internalConditions) > 0 {
+		internalWhereClause += " AND " + strings.Join(internalConditions, " AND ")
+	}
+
+	// Build filters for boundary flows
+	var boundaryConditions []string
+	var boundaryArgs []interface{}
+
+	// Date range (always required)
+	boundaryConditions = append(boundaryConditions, "DATE(mcd.consumption_date) BETWEEN ? AND ?")
+	boundaryArgs = append(boundaryArgs, params.DateFrom, params.DateTo)
+
+	// Location filter (for boundary meters)
+	if len(params.Locations) > 0 {
+		placeholders := make([]string, len(params.Locations))
+		for i := range params.Locations {
+			placeholders[i] = "?"
+		}
+		boundaryConditions = append(boundaryConditions, "LOWER(m.location) IN ("+strings.Join(placeholders, ",")+")")
+		for _, l := range stringsToLower(params.Locations) {
+			boundaryArgs = append(boundaryArgs, l)
+		}
+	}
+
+	// Boundary metering point filter
+	if len(params.BoundaryMeteringPoint) > 0 {
+		placeholders := make([]string, len(params.BoundaryMeteringPoint))
+		for i := range params.BoundaryMeteringPoint {
+			placeholders[i] = "?"
+		}
+		boundaryConditions = append(boundaryConditions, "LOWER(m.boundary_metering_point) IN ("+strings.Join(placeholders, ",")+")")
+		for _, bmp := range stringsToLower(params.BoundaryMeteringPoint) {
+			boundaryArgs = append(boundaryArgs, bmp)
+		}
+	}
+
+	// Meter number filter (for boundary meters)
+	if len(params.MeterNumber) > 0 {
+		placeholders := make([]string, len(params.MeterNumber))
+		for i := range params.MeterNumber {
+			placeholders[i] = "?"
+		}
+		boundaryConditions = append(boundaryConditions, "m.meter_number IN ("+strings.Join(placeholders, ",")+")")
+		for _, mn := range params.MeterNumber {
+			boundaryArgs = append(boundaryArgs, mn)
+		}
+	}
+
+	// Voltage filter (for boundary meters)
+	if len(params.Voltages) > 0 {
+		placeholders := make([]string, len(params.Voltages))
+		for i := range params.Voltages {
+			placeholders[i] = "?"
+		}
+		boundaryConditions = append(boundaryConditions, "m.voltage_kv IN ("+strings.Join(placeholders, ",")+")")
+		for _, v := range params.Voltages {
+			boundaryArgs = append(boundaryArgs, v)
+		}
+	}
+
+	// Build WHERE clause for boundary flows
+	boundaryWhereClause := "m.meter_type = 'REGIONAL_BOUNDARY' AND mcd.data_item_id != 'NO_DATA' AND m.boundary_metering_point IS NOT NULL AND m.boundary_metering_point LIKE '%/%' AND di.system_name IN ('import_kwh', 'export_kwh')"
+	if len(boundaryConditions) > 0 {
+		boundaryWhereClause += " AND " + strings.Join(boundaryConditions, " AND ")
+	}
+
+	// Build final region filter for the outer query (CRITICAL!)
+	var finalRegionFilter string
+	var finalRegionArgs []interface{}
+	if len(params.Regions) > 0 {
+		placeholders := make([]string, len(params.Regions))
+		for i := range params.Regions {
+			placeholders[i] = "?"
+		}
+		finalRegionFilter = "AND LOWER(COALESCE(i.region, b.region)) IN (" + strings.Join(placeholders, ",") + ")"
+		for _, r := range stringsToLower(params.Regions) {
+			finalRegionArgs = append(finalRegionArgs, r)
+		}
+	}
+
+	// Build the complete energy balance query
+	query := `
+		WITH 
+		-- 0. Get valid regions from m.region (BSP/DTX meters only - our source of truth)
+		valid_regions AS (
+			SELECT DISTINCT LOWER(TRIM(region)) as region_name
+			FROM app.meters
+			WHERE region IS NOT NULL 
+			  AND TRIM(region) != ''
+			  AND meter_type IN ('BSP', 'DTX')
+		),
+		-- 1. Internal consumption (BSP - DTX) for each region
+		internal_consumption AS (
+			SELECT 
+				COALESCE(LOWER(m.region), 'unknown') as region,
+				DATE(mcd.consumption_date) as date,
+				SUM(CASE WHEN m.meter_type = 'BSP' AND di.system_name = 'import_kwh' 
+						 THEN mcd.consumption ELSE 0 END) as bsp_import,
+				SUM(CASE WHEN m.meter_type = 'DTX' AND di.system_name = 'import_kwh' 
+						 THEN mcd.consumption ELSE 0 END) as dtx_import,
+				SUM(CASE WHEN m.meter_type = 'BSP' AND di.system_name = 'import_kwh' 
+						 THEN mcd.consumption 
+						 WHEN m.meter_type = 'DTX' AND di.system_name = 'import_kwh' 
+						 THEN -mcd.consumption 
+						 ELSE 0 END) as internal_net,
+				COUNT(DISTINCT CASE WHEN m.meter_type = 'BSP' THEN m.meter_number END) as bsp_meter_count,
+				COUNT(DISTINCT CASE WHEN m.meter_type = 'DTX' THEN m.meter_number END) as dtx_meter_count
+			FROM app.meter_consumption_daily mcd 
+			JOIN app.meters m ON m.meter_number = mcd.meter_number
+			JOIN app.data_item_mapping di ON di.data_item_id = mcd.data_item_id
+			WHERE ` + internalWhereClause + `
+			GROUP BY COALESCE(LOWER(m.region), 'unknown'), DATE(mcd.consumption_date)
+		),
+		-- 2. Parse boundary metering points
+		boundary_flows_parsed AS (
+			SELECT 
+				DATE(mcd.consumption_date) as date,
+				m.meter_number,
+				m.boundary_metering_point,
+				m.location,
+				m.voltage_kv,
+				LOWER(TRIM(SPLIT_PART(m.boundary_metering_point, '/', 1))) as region_a,
+				LOWER(TRIM(SPLIT_PART(m.boundary_metering_point, '/', 2))) as region_b,
+				SUM(CASE WHEN di.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END) as import_kwh,
+				SUM(CASE WHEN di.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END) as export_kwh,
+				COUNT(*) as reading_count,
+				CASE 
+					WHEN COUNT(*) >= 48 THEN 'complete'
+					WHEN COUNT(*) >= 24 THEN 'partial'
+					ELSE 'incomplete'
+				END as data_quality
+			FROM app.meter_consumption_daily mcd 
+			JOIN app.meters m ON m.meter_number = mcd.meter_number
+			JOIN app.data_item_mapping di ON di.data_item_id = mcd.data_item_id
+			WHERE ` + boundaryWhereClause + `
+			GROUP BY 
+				DATE(mcd.consumption_date),
+				m.meter_number,
+				m.boundary_metering_point,
+				m.location,
+				m.voltage_kv
+		),
+		-- 3. Validate that BOTH regions exist in valid_regions
+		boundary_flows_validated AS (
+			SELECT 
+				bfp.*,
+				EXISTS (SELECT 1 FROM valid_regions WHERE region_name = bfp.region_a) as region_a_valid,
+				EXISTS (SELECT 1 FROM valid_regions WHERE region_name = bfp.region_b) as region_b_valid
+			FROM boundary_flows_parsed bfp
+		),
+		-- 4. Create boundary flow entries for BOTH regions (if both valid)
+		boundary_flows_per_region AS (
+			-- Entries for region_a
+			SELECT 
+				date,
+				region_a as region,
+				meter_number,
+				boundary_metering_point,
+				location,
+				voltage_kv,
+				region_b as connected_region,
+				import_kwh,
+				export_kwh,
+				import_kwh - export_kwh as net_flow,
+				reading_count,
+				data_quality,
+				region_a_valid,
+				region_b_valid
+			FROM boundary_flows_validated
+			WHERE region_a_valid = true
+			
+			UNION ALL
+			
+			-- Entries for region_b (swapped perspective)
+			SELECT 
+				date,
+				region_b as region,
+				meter_number,
+				boundary_metering_point,
+				location,
+				voltage_kv,
+				region_a as connected_region,
+				export_kwh as import_kwh,
+				import_kwh as export_kwh,
+				export_kwh - import_kwh as net_flow,
+				reading_count,
+				data_quality,
+				region_a_valid,
+				region_b_valid
+			FROM boundary_flows_validated
+			WHERE region_b_valid = true
+		),
+		-- 5. Build boundary meter details for each region
+		boundary_meter_details AS (
+			SELECT 
+				date,
+				region,
+				jsonb_agg(
+					jsonb_build_object(
+						'meter_number', meter_number,
+						'boundary_metering_point', boundary_metering_point,
+						'connected_region', connected_region,
+						'location', location,
+						'voltage_kv', voltage_kv,
+						'import_kwh', import_kwh,
+						'export_kwh', export_kwh,
+						'net_flow', net_flow,
+						'reading_count', reading_count,
+						'data_quality', data_quality
+					) ORDER BY meter_number
+				) as boundary_meters_json
+			FROM boundary_flows_per_region
+			GROUP BY date, region
+		),
+		-- 6. Aggregate by connected region AND location
+		boundary_by_connected_region_and_location AS (
+			SELECT 
+				date,
+				region,
+				connected_region,
+				location,
+				SUM(import_kwh) as location_import,
+				SUM(export_kwh) as location_export,
+				SUM(net_flow) as location_net_flow
+			FROM boundary_flows_per_region
+			GROUP BY date, region, connected_region, location
+		),
+		-- 6b. Aggregate totals by connected region (without location)
+		boundary_by_connected_region AS (
+			SELECT 
+				date,
+				region,
+				connected_region,
+				SUM(import_kwh) as total_import_from_region,
+				SUM(export_kwh) as total_export_to_region,
+				SUM(net_flow) as net_flow
+			FROM boundary_flows_per_region
+			GROUP BY date, region, connected_region
+		),
+		-- 7. Build by_location map for each connected region
+		boundary_location_map AS (
+			SELECT 
+				date,
+				region,
+				connected_region,
+				jsonb_object_agg(
+					location,
+					jsonb_build_object(
+						'location', location,
+						'import_kwh', location_import,
+						'export_kwh', location_export,
+						'net_flow', location_net_flow
+					)
+				) as by_location_json
+			FROM boundary_by_connected_region_and_location
+			GROUP BY date, region, connected_region
+		),
+		-- 8. Build by_connected_region JSON map with location breakdown
+		boundary_connected_region_map AS (
+			SELECT 
+				bcr.date,
+				bcr.region,
+				jsonb_object_agg(
+					bcr.connected_region,
+					jsonb_build_object(
+						'connected_region', bcr.connected_region,
+						'total_import_from_them', bcr.total_import_from_region,
+						'total_export_to_them', bcr.total_export_to_region,
+						'net_flow', bcr.net_flow,
+						'flow_balance', CASE 
+							WHEN bcr.net_flow > 10 THEN 'importing'
+							WHEN bcr.net_flow < -10 THEN 'exporting'
+							ELSE 'balanced'
+						END,
+						'by_location', COALESCE(blm.by_location_json, '{}'::jsonb)
+					)
+				) as by_connected_region_json
+			FROM boundary_by_connected_region bcr
+			LEFT JOIN boundary_location_map blm 
+				ON bcr.date = blm.date 
+				AND bcr.region = blm.region 
+				AND bcr.connected_region = blm.connected_region
+			GROUP BY bcr.date, bcr.region
+		),
+		-- 9. Aggregate total boundary flows by region
+		boundary_totals AS (
+			SELECT 
+				date,
+				region,
+				SUM(import_kwh) as total_import,
+				SUM(export_kwh) as total_export,
+				SUM(net_flow) as net_boundary_flow,
+				COUNT(DISTINCT meter_number) as boundary_meter_count
+			FROM boundary_flows_per_region
+			GROUP BY date, region
+		)
+		-- 10. Final result combining internal consumption and boundary flows
+		SELECT 
+			COALESCE(i.region, b.region) as region,
+			COALESCE(i.date, b.date) as date,
+			-- Internal consumption
+			COALESCE(i.bsp_import, 0) as bsp_import,
+			COALESCE(i.dtx_import, 0) as dtx_import,
+			COALESCE(i.internal_net, 0) as internal_net_consumption,
+			COALESCE(i.bsp_meter_count, 0) as bsp_meter_count,
+			COALESCE(i.dtx_meter_count, 0) as dtx_meter_count,
+			-- Boundary flows
+			COALESCE(b.total_import, 0) as boundary_total_import,
+			COALESCE(b.total_export, 0) as boundary_total_export,
+			COALESCE(b.net_boundary_flow, 0) as net_boundary_flow,
+			COALESCE(b.boundary_meter_count, 0) as boundary_meter_count,
+			COALESCE(bmd.boundary_meters_json, '[]'::jsonb) as boundary_meters_json,
+			COALESCE(bcr.by_connected_region_json, '{}'::jsonb) as by_connected_region_json,
+			-- Total
+			COALESCE(i.internal_net, 0) + COALESCE(b.net_boundary_flow, 0) as total_net_consumption
+		FROM internal_consumption i
+		FULL OUTER JOIN boundary_totals b 
+			ON i.region = b.region AND i.date = b.date
+		LEFT JOIN boundary_meter_details bmd
+			ON COALESCE(i.region, b.region) = bmd.region 
+			AND COALESCE(i.date, b.date) = bmd.date
+		LEFT JOIN boundary_connected_region_map bcr
+			ON COALESCE(i.region, b.region) = bcr.region 
+			AND COALESCE(i.date, b.date) = bcr.date
+		WHERE COALESCE(i.region, b.region) IS NOT NULL
+			AND COALESCE(i.date, b.date) IS NOT NULL
+			` + finalRegionFilter + `
+		ORDER BY COALESCE(i.date, b.date), COALESCE(i.region, b.region)
+	`
+
+	// Combine all arguments (order matters!)
+	args := append(internalArgs, boundaryArgs...)
+	args = append(args, finalRegionArgs...)
+
+	// Define raw result structure from query
+	type rawResult struct {
+		Region                 string          `bun:"region"`
+		Date                   time.Time       `bun:"date"`
+		BSPImport              float64         `bun:"bsp_import"`
+		DTXImport              float64         `bun:"dtx_import"`
+		InternalNetConsumption float64         `bun:"internal_net_consumption"`
+		BSPMeterCount          int             `bun:"bsp_meter_count"`
+		DTXMeterCount          int             `bun:"dtx_meter_count"`
+		BoundaryTotalImport    float64         `bun:"boundary_total_import"`
+		BoundaryTotalExport    float64         `bun:"boundary_total_export"`
+		NetBoundaryFlow        float64         `bun:"net_boundary_flow"`
+		BoundaryMeterCount     int             `bun:"boundary_meter_count"`
+		BoundaryMetersJSON     json.RawMessage `bun:"boundary_meters_json"`
+		ByConnectedRegionJSON  json.RawMessage `bun:"by_connected_region_json"`
+		TotalNetConsumption    float64         `bun:"total_net_consumption"`
+	}
+
+	// Execute query
+	var rawResults []rawResult
+	err := s.db.NewRaw(query, args...).Scan(ctx, &rawResults)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate energy balance: %w", err)
+	}
+
+	// Transform raw results into enhanced structure
+	results := make([]models.RegionalEnergyBalance, len(rawResults))
+
+	for i, raw := range rawResults {
+		// Parse boundary meters JSON (handle null/empty cases)
+		var boundaryMeters []models.BoundaryMeterDetail
+		if len(raw.BoundaryMetersJSON) > 0 &&
+			string(raw.BoundaryMetersJSON) != "[]" &&
+			string(raw.BoundaryMetersJSON) != "null" {
+			if err := json.Unmarshal(raw.BoundaryMetersJSON, &boundaryMeters); err != nil {
+				boundaryMeters = []models.BoundaryMeterDetail{}
+			}
+		} else {
+			boundaryMeters = []models.BoundaryMeterDetail{}
+		}
+
+		// Parse by_connected_region JSON map
+		var byConnectedRegion map[string]models.RegionFlowDetail
+		if len(raw.ByConnectedRegionJSON) > 0 &&
+			string(raw.ByConnectedRegionJSON) != "{}" &&
+			string(raw.ByConnectedRegionJSON) != "null" {
+			if err := json.Unmarshal(raw.ByConnectedRegionJSON, &byConnectedRegion); err != nil {
+				byConnectedRegion = make(map[string]models.RegionFlowDetail)
+			}
+		} else {
+			byConnectedRegion = make(map[string]models.RegionFlowDetail)
+		}
+
+		// Calculate metrics
+		var crossBoundaryDependency, internalSufficiency float64
+		if raw.TotalNetConsumption > 0 {
+			crossBoundaryDependency = (raw.NetBoundaryFlow / raw.TotalNetConsumption) * 100
+		}
+		if raw.TotalNetConsumption != 0 {
+			internalSufficiency = (raw.InternalNetConsumption / raw.TotalNetConsumption) * 100
+		}
+
+		// Determine dominant flow direction
+		dominantFlow := "balanced"
+		if raw.BoundaryTotalImport > raw.BoundaryTotalExport*1.1 {
+			dominantFlow = "net_importer"
+		} else if raw.BoundaryTotalExport > raw.BoundaryTotalImport*1.1 {
+			dominantFlow = "net_exporter"
+		}
+
+		// Determine balance type
+		var balanceType string
+		if internalSufficiency >= 95 {
+			balanceType = "self_sufficient"
+		} else if raw.NetBoundaryFlow > 0 {
+			balanceType = "net_importer"
+		} else if raw.NetBoundaryFlow < 0 {
+			balanceType = "net_exporter"
+		} else {
+			balanceType = "balanced"
+		}
+
+		// Generate flags
+		var flags []string
+		if crossBoundaryDependency > 50 {
+			flags = append(flags, "critical_import_dependency")
+		} else if crossBoundaryDependency > 30 {
+			flags = append(flags, "heavy_cross_boundary_importer")
+		}
+		if math.Abs(crossBoundaryDependency) > 30 && raw.NetBoundaryFlow < 0 {
+			flags = append(flags, "heavy_cross_boundary_exporter")
+		}
+		if raw.BoundaryMeterCount == 0 {
+			flags = append(flags, "isolated_region")
+		} else if raw.BoundaryMeterCount >= 5 {
+			flags = append(flags, "highly_interconnected")
+		}
+		if raw.BSPMeterCount < 2 {
+			flags = append(flags, "limited_bsp_coverage")
+		}
+		if raw.DTXMeterCount < 5 {
+			flags = append(flags, "limited_dtx_coverage")
+		}
+
+		// Build final result
+		results[i] = models.RegionalEnergyBalance{
+			Region: raw.Region,
+			Date:   raw.Date,
+			InternalConsumption: models.InternalConsumptionDetail{
+				BSPImport:     raw.BSPImport,
+				DTXImport:     raw.DTXImport,
+				NetInternal:   raw.InternalNetConsumption,
+				BSPMeterCount: raw.BSPMeterCount,
+				DTXMeterCount: raw.DTXMeterCount,
+			},
+			CrossBoundaryFlows: models.CrossBoundaryFlowDetail{
+				BoundaryMeters:          boundaryMeters,
+				ByConnectedRegion:       byConnectedRegion,
+				TotalImportKWh:          raw.BoundaryTotalImport,
+				TotalExportKWh:          raw.BoundaryTotalExport,
+				NetCrossBoundaryFlow:    raw.NetBoundaryFlow,
+				BoundaryMeterCount:      raw.BoundaryMeterCount,
+				IsNetImporter:           raw.NetBoundaryFlow > 0,
+				CrossBoundaryDependency: math.Round(crossBoundaryDependency*100) / 100,
+				DominantFlowDirection:   dominantFlow,
+			},
+			TotalNetConsumption: raw.TotalNetConsumption,
+			BalanceAnalysis: models.BalanceAnalysis{
+				InternalSufficiency:   math.Round(internalSufficiency*100) / 100,
+				CrossBoundaryReliance: math.Round(math.Abs(crossBoundaryDependency)*100) / 100,
+				BalanceType:           balanceType,
+				Flags:                 flags,
+			},
+		}
+	}
+
+	// Build response with summary
+	response := &models.EnergyBalanceResponse{
+		Data: results,
+	}
+
+	response.Summary.DateRange.From = params.DateFrom.Format("2006-01-02")
+	response.Summary.DateRange.To = params.DateTo.Format("2006-01-02")
+
+	// Calculate aggregate metrics
+	regionsMap := make(map[string]bool)
+	var totalBSP, totalDTX, totalInternal, totalBoundary, totalNet float64
+
+	for _, r := range results {
+		regionsMap[r.Region] = true
+		totalBSP += r.InternalConsumption.BSPImport
+		totalDTX += r.InternalConsumption.DTXImport
+		totalInternal += r.InternalConsumption.NetInternal
+		totalBoundary += r.CrossBoundaryFlows.NetCrossBoundaryFlow
+		totalNet += r.TotalNetConsumption
+	}
+
+	response.Summary.TotalRegions = len(regionsMap)
+	response.Summary.Metrics.TotalBSPImport = math.Round(totalBSP*100) / 100
+	response.Summary.Metrics.TotalDTXImport = math.Round(totalDTX*100) / 100
+	response.Summary.Metrics.TotalInternalNet = math.Round(totalInternal*100) / 100
+	response.Summary.Metrics.TotalCrossBoundaryNet = math.Round(totalBoundary*100) / 100
+	response.Summary.Metrics.TotalNetConsumption = math.Round(totalNet*100) / 100
+
+	if len(results) > 0 {
+		response.Summary.Metrics.AverageDailyConsumption = math.Round((totalNet/float64(len(results)))*100) / 100
+	}
+
+	return response, nil
+}
+
+// GetRegionalEnergyBalanceSummary returns aggregated balance by region over entire date range
+func (s *MeterService) GetRegionalEnergyBalanceSummary(
+	ctx context.Context,
+	params models.EnergyBalanceParams,
+) ([]models.RegionalEnergyBalanceSummary, error) {
+
+	detailedResponse, err := s.GetRegionalEnergyBalance(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	regionMap := make(map[string]*models.RegionalEnergyBalanceSummary)
+
+	for _, r := range detailedResponse.Data {
+		if _, exists := regionMap[r.Region]; !exists {
+			regionMap[r.Region] = &models.RegionalEnergyBalanceSummary{
+				Region: r.Region,
+			}
+		}
+
+		summary := regionMap[r.Region]
+		summary.TotalBSPImport += r.InternalConsumption.BSPImport
+		summary.TotalDTXImport += r.InternalConsumption.DTXImport
+		summary.TotalInternalNet += r.InternalConsumption.NetInternal
+		summary.TotalCrossBoundaryNet += r.CrossBoundaryFlows.NetCrossBoundaryFlow
+		summary.TotalNetConsumption += r.TotalNetConsumption
+		summary.DayCount++
+	}
+
+	results := make([]models.RegionalEnergyBalanceSummary, 0, len(regionMap))
+	for _, summary := range regionMap {
+		if summary.DayCount > 0 {
+			summary.AverageDailyConsumption = math.Round((summary.TotalNetConsumption/float64(summary.DayCount))*100) / 100
+		}
+		summary.TotalBSPImport = math.Round(summary.TotalBSPImport*100) / 100
+		summary.TotalDTXImport = math.Round(summary.TotalDTXImport*100) / 100
+		summary.TotalInternalNet = math.Round(summary.TotalInternalNet*100) / 100
+		summary.TotalCrossBoundaryNet = math.Round(summary.TotalCrossBoundaryNet*100) / 100
+		summary.TotalNetConsumption = math.Round(summary.TotalNetConsumption*100) / 100
+
+		results = append(results, *summary)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Region < results[j].Region
+	})
+
+	return results, nil
+}
+
 // Helper function to transform raw GeoJSON to Feature format
 func transformToFeatureGeoJSON(rawGeoJSON json.RawMessage, district, region string) json.RawMessage {
 	type Geometry struct {
@@ -4033,6 +4826,72 @@ func (s *MeterService) GetDistrictGeometries(
 	return &models.DistrictGeometryResponse{
 		Version:   version,
 		Districts: geometries,
+	}, nil
+}
+
+// GetRegionGeometries returns simplified regional boundaries by dissolving/unioning district geometries
+func (s *MeterService) GetRegionGeometries(
+	ctx context.Context,
+	regions []string,
+) (*models.RegionGeometryResponse, error) {
+
+	// Get the latest boundary update date for versioning
+	var versionDate time.Time
+	err := s.db.NewSelect().
+		ColumnExpr("MAX(updated_at) as max_date").
+		TableExpr("app.dbo_ecg").
+		Scan(ctx, &versionDate)
+	if err != nil {
+		versionDate = time.Now() // Fallback to current date
+	}
+
+	version := versionDate.Format("2006-01-02")
+
+	// Build query for regional geometries using ST_Union to dissolve districts
+	q := s.db.NewSelect().
+		ColumnExpr("d.region").
+		ColumnExpr("ST_Y(ST_Centroid(ST_Union(d.the_geom))) as center_lat").
+		ColumnExpr("ST_X(ST_Centroid(ST_Union(d.the_geom))) as center_lng").
+		ColumnExpr(`
+            jsonb_build_object(
+                'type', 'Feature',
+                'properties', jsonb_build_object(
+                    'region', d.region
+                ),
+                'geometry', ST_AsGeoJSON(
+                    ST_SimplifyPreserveTopology(
+                        ST_Union(d.the_geom), 
+                        0.001  -- Simplify to ~111m tolerance
+                    )
+                )::jsonb
+            ) as geojson
+        `).
+		TableExpr("app.dbo_ecg d").
+		Where("d.region IS NOT NULL").
+		GroupExpr("d.region").
+		OrderExpr("d.region")
+
+	// Apply region filter if provided
+	if len(regions) > 0 {
+		lowerRegions := stringsToLower(regions)
+		q = q.Where("LOWER(d.region) IN (?)", bun.In(lowerRegions))
+	}
+
+	var geometries []models.RegionGeometry
+	if err := q.Scan(ctx, &geometries); err != nil {
+		return nil, fmt.Errorf("failed to get region geometries: %w", err)
+	}
+
+	// Round coordinates for optimization
+	for i := range geometries {
+		geometries[i].CenterLat = roundCoordinate(geometries[i].CenterLat, 6)
+		geometries[i].CenterLng = roundCoordinate(geometries[i].CenterLng, 6)
+		geometries[i].GeoJSON = simplifyGeoJSONCoordinates(geometries[i].GeoJSON, 6)
+	}
+
+	return &models.RegionGeometryResponse{
+		Version: version,
+		Regions: geometries,
 	}, nil
 }
 

@@ -88,23 +88,26 @@ type DailyConsumptionResult struct {
 	SystemName      string    `bun:"system_name" json:"system_name"`
 }
 
+// Updated QueryMeters with case-insensitive region filter
 func (s *MeterService) QueryMeters(ctx context.Context, r *http.Request) (*MeterQueryResult, error) {
 	params := parseMeterQuery(r)
 
 	q := s.db.NewSelect().Model((*models.Meter)(nil))
 
+	// Case-insensitive region filter
 	if len(params.Regions) > 0 {
-		q.Where("region IN (?)", bun.In(params.Regions))
+		lowerRegions := stringsToLower(params.Regions)
+		q = q.Where("LOWER(region) IN (?)", bun.In(lowerRegions))
 	}
 	if len(params.MeterTypes) > 0 {
-		q.Where("meter_type IN (?)", bun.In(params.MeterTypes))
+		q = q.Where("meter_type IN (?)", bun.In(params.MeterTypes))
 	}
 	if len(params.Locations) > 0 {
-		q.Where("location IN (?)", bun.In(params.Locations))
+		q = q.Where("location IN (?)", bun.In(params.Locations))
 	}
 	if params.Search != "" {
 		search := "%" + params.Search + "%"
-		q.Where("meter_number ILIKE ? OR station ILIKE ? OR feeder_panel_name ILIKE ?", search, search, search)
+		q = q.Where("meter_number ILIKE ? OR station ILIKE ? OR feeder_panel_name ILIKE ?", search, search, search)
 	}
 
 	// Sorting
@@ -113,7 +116,7 @@ func (s *MeterService) QueryMeters(ctx context.Context, r *http.Request) (*Meter
 		if strings.ToLower(params.SortOrder) == "desc" {
 			order = "DESC"
 		}
-		q.Order(params.SortBy + " " + order)
+		q = q.Order(params.SortBy + " " + order)
 	}
 
 	// Count total before pagination
@@ -123,7 +126,7 @@ func (s *MeterService) QueryMeters(ctx context.Context, r *http.Request) (*Meter
 	}
 
 	// Apply pagination
-	q.Offset((params.Page - 1) * params.Limit).Limit(params.Limit)
+	q = q.Offset((params.Page - 1) * params.Limit).Limit(params.Limit)
 
 	var meters []models.Meter
 	if err := q.Scan(ctx, &meters); err != nil {

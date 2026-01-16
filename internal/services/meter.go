@@ -34,45 +34,45 @@ type MeterQueryParams struct {
 	Columns    []string
 }
 
-func parseMeterQuery(r *http.Request) MeterQueryParams {
-	q := r.URL.Query()
-
-	page, _ := strconv.Atoi(q.Get("page"))
-	if page < 1 {
-		page = 1
-	}
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 {
-		limit = 50
-	}
-
-	trimSplit := func(val string) []string {
-		if val == "" {
-			return nil
-		}
-		parts := strings.Split(val, ",")
-		out := []string{}
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				out = append(out, p)
-			}
-		}
-		return out
-	}
-
-	return MeterQueryParams{
-		Page:       page,
-		Limit:      limit,
-		Regions:    trimSplit(q.Get("regions")),
-		MeterTypes: trimSplit(q.Get("meterTypes")),
-		Locations:  trimSplit(q.Get("locations")),
-		Search:     q.Get("search"),
-		SortBy:     q.Get("sortBy"),
-		SortOrder:  q.Get("sortOrder"),
-		Columns:    trimSplit(q.Get("columns")),
-	}
-}
+//func parseMeterQuery(r *http.Request) MeterQueryParams {
+//	q := r.URL.Query()
+//
+//	page, _ := strconv.Atoi(q.Get("page"))
+//	if page < 1 {
+//		page = 1
+//	}
+//	limit, _ := strconv.Atoi(q.Get("limit"))
+//	if limit <= 0 {
+//		limit = 50
+//	}
+//
+//	trimSplit := func(val string) []string {
+//		if val == "" {
+//			return nil
+//		}
+//		parts := strings.Split(val, ",")
+//		out := []string{}
+//		for _, p := range parts {
+//			p = strings.TrimSpace(p)
+//			if p != "" {
+//				out = append(out, p)
+//			}
+//		}
+//		return out
+//	}
+//
+//	return MeterQueryParams{
+//		Page:       page,
+//		Limit:      limit,
+//		Regions:    trimSplit(q.Get("regions")),
+//		MeterTypes: trimSplit(q.Get("meterTypes")),
+//		Locations:  trimSplit(q.Get("locations")),
+//		Search:     q.Get("search"),
+//		SortBy:     q.Get("sortBy"),
+//		SortOrder:  q.Get("sortOrder"),
+//		Columns:    trimSplit(q.Get("columns")),
+//	}
+//}
 
 type MeterQueryResult struct {
 	Data []models.Meter `json:"data"`

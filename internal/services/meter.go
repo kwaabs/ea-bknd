@@ -88,84 +88,52 @@ type DailyConsumptionResult struct {
 	SystemName      string    `bun:"system_name" json:"system_name"`
 }
 
-// Updated QueryMeters with case-insensitive region filter
-func (s *MeterService) QueryMeters(ctx context.Context, r *http.Request) (*MeterQueryResult, error) {
-	params := parseMeterQuery(r)
+func parseMeterQuery(r *http.Request) MeterQueryParams {
+	q := r.URL.Query()
 
-	q := s.db.NewSelect().Model((*models.Meter)(nil))
-
-	// Case-insensitive region filter
-	if len(params.Regions) > 0 {
-		lowerRegions := stringsToLower(params.Regions)
-		q = q.Where("LOWER(region) IN (?)", bun.In(lowerRegions))
+	page, _ := strconv.Atoi(q.Get("page"))
+	if page < 1 {
+		page = 1
 	}
-	if len(params.MeterTypes) > 0 {
-		q = q.Where("meter_type IN (?)", bun.In(params.MeterTypes))
-	}
-	if len(params.Locations) > 0 {
-		q = q.Where("location IN (?)", bun.In(params.Locations))
-	}
-	if params.Search != "" {
-		search := "%" + params.Search + "%"
-		q = q.Where("meter_number ILIKE ? OR station ILIKE ? OR feeder_panel_name ILIKE ?", search, search, search)
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 50
 	}
 
-	// Sorting
-	if params.SortBy != "" {
-		order := "ASC"
-		if strings.ToLower(params.SortOrder) == "desc" {
-			order = "DESC"
+	trimSplit := func(val string) []string {
+		if val == "" {
+			return nil
 		}
-		q = q.Order(params.SortBy + " " + order)
+		parts := strings.Split(val, ",")
+		out := []string{}
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
 	}
 
-	// Count total before pagination
-	total, err := q.Count(ctx)
-	if err != nil {
-		return nil, err
+	// Helper to get parameter supporting both singular and plural forms
+	getParam := func(singular, plural string) string {
+		if val := q.Get(singular); val != "" {
+			return val
+		}
+		return q.Get(plural)
 	}
 
-	// Apply pagination
-	q = q.Offset((params.Page - 1) * params.Limit).Limit(params.Limit)
-
-	var meters []models.Meter
-	if err := q.Scan(ctx, &meters); err != nil {
-		return nil, err
+	return MeterQueryParams{
+		Page:       page,
+		Limit:      limit,
+		Regions:    trimSplit(getParam("region", "regions")),       // Support both "region" and "regions"
+		MeterTypes: trimSplit(getParam("meterType", "meterTypes")), // Support both "meterType" and "meterTypes"
+		Locations:  trimSplit(getParam("location", "locations")),   // Support both "location" and "locations"
+		Search:     q.Get("search"),
+		SortBy:     q.Get("sortBy"),
+		SortOrder:  q.Get("sortOrder"),
+		Columns:    trimSplit(q.Get("columns")),
 	}
-
-	meta := map[string]any{
-		"page":  params.Page,
-		"limit": params.Limit,
-		"total": total,
-		"pages": (total + params.Limit - 1) / params.Limit, // ceil
-	}
-
-	// Add applied filters dynamically
-	filters := map[string]any{}
-	if len(params.Regions) > 0 {
-		filters["regions"] = params.Regions
-	}
-	if len(params.MeterTypes) > 0 {
-		filters["meterTypes"] = params.MeterTypes
-	}
-	if len(params.Locations) > 0 {
-		filters["locations"] = params.Locations
-	}
-	if params.Search != "" {
-		filters["search"] = params.Search
-	}
-	if params.SortBy != "" {
-		filters["sortBy"] = params.SortBy
-		filters["sortOrder"] = params.SortOrder
-	}
-	if len(filters) > 0 {
-		meta["filters"] = filters
-	}
-
-	return &MeterQueryResult{
-		Data: meters,
-		Meta: meta,
-	}, nil
 }
 
 // GetByID returns a single meter by ID

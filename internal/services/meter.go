@@ -1878,7 +1878,7 @@ func (s *MeterService) GetMeterStatusCounts(
        `).
 		Join(`
           LEFT JOIN (
-             SELECT 
+             SELECT
                 meter_number,
                 MAX(consumption_date) AS last_consumption_date,
                 BOOL_OR(data_item_id != 'NO_DATA' AND data_item_id = '00100000') AS has_actual_data
@@ -1932,18 +1932,18 @@ func (s *MeterService) GetMeterStatusSummary(
 		TableExpr("app.meters AS mtr").
 		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.has_actual_data = true THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.has_actual_data = true THEN mtr.meter_number
 			END) as online_meters
 		`).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.has_actual_data = false THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.has_actual_data = false THEN mtr.meter_number
 			END) as offline_no_data_meters
 		`).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.meter_number IS NULL THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.meter_number IS NULL THEN mtr.meter_number
 			END) as offline_no_record_meters
 		`).
 		ColumnExpr(`
@@ -1954,12 +1954,12 @@ func (s *MeterService) GetMeterStatusSummary(
 		`).
 		Join(`
 			LEFT JOIN (
-				SELECT 
+				SELECT
 					meter_number,
 					MAX(consumption_date) as last_consumption_date,
 					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
 					SUM(consumption) as total_consumption,
-					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 / 
+					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 /
 					 ?) as uptime_percentage
 				FROM app.meter_consumption_daily
 				WHERE consumption_date BETWEEN ? AND ?
@@ -2122,7 +2122,7 @@ func (s *MeterService) GetMeterStatusTimeline(
 		ColumnExpr("COUNT(DISTINCT CASE WHEN NOT is_online THEN meter_number END) as offline").
 		ColumnExpr("COUNT(DISTINCT meter_number) as total").
 		TableExpr(`(
-			SELECT 
+			SELECT
 				DATE(mcd.consumption_date) as date,
 				mcd.meter_number,
 				BOOL_OR(mcd.data_item_id != 'NO_DATA') as is_online
@@ -2207,7 +2207,7 @@ func (s *MeterService) GetMeterStatusDetails(
 		Column("mtr.ic_og").
 		Column("mtr.boundary_metering_point").
 		ColumnExpr(`
-			CASE 
+			CASE
 				WHEN COUNT(CASE WHEN mcd.data_item_id != 'NO_DATA' THEN 1 END) > 0 THEN 'ONLINE'
 				WHEN COUNT(CASE WHEN mcd.data_item_id = 'NO_DATA' THEN 1 END) > 0 THEN 'OFFLINE - No Data'
 				ELSE 'OFFLINE - No Record'
@@ -2216,7 +2216,7 @@ func (s *MeterService) GetMeterStatusDetails(
 		ColumnExpr("MAX(mcd.consumption_date) as last_consumption_date").
 		ColumnExpr("COALESCE(SUM(mcd.consumption), 0) as total_consumption_kwh").
 		ColumnExpr(`
-			(COUNT(DISTINCT CASE WHEN mcd.data_item_id != 'NO_DATA' THEN DATE(mcd.consumption_date) END) * 100.0 / 
+			(COUNT(DISTINCT CASE WHEN mcd.data_item_id != 'NO_DATA' THEN DATE(mcd.consumption_date) END) * 100.0 /
 			 ?) as uptime_percentage
 		`, daysInRange).
 		ColumnExpr(`
@@ -2224,8 +2224,8 @@ func (s *MeterService) GetMeterStatusDetails(
 		`, daysInRange).
 		ColumnExpr("MAX(mcd.day_end_time) as last_reading_time").
 		Join(`
-			LEFT JOIN app.meter_consumption_daily AS mcd 
-			ON mtr.meter_number = mcd.meter_number 
+			LEFT JOIN app.meter_consumption_daily AS mcd
+			ON mtr.meter_number = mcd.meter_number
 			AND mcd.consumption_date BETWEEN ? AND ?
 		`, params.DateFrom, params.DateTo)
 
@@ -2435,37 +2435,37 @@ func (s *MeterService) GetMeterHealthMetrics(
 		TableExpr("app.meters AS mtr").
 		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage >= ? THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage >= ? THEN mtr.meter_number
 			END) as healthy_meters
 		`, healthyThreshold).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage >= ? AND mcd.uptime_percentage < ? THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage >= ? AND mcd.uptime_percentage < ? THEN mtr.meter_number
 			END) as warning_meters
 		`, warningThreshold, healthyThreshold).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage < ? OR mcd.uptime_percentage IS NULL THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage < ? OR mcd.uptime_percentage IS NULL THEN mtr.meter_number
 			END) as critical_meters
 		`, warningThreshold).
 		ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.last_consumption_date < ? THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.last_consumption_date < ? THEN mtr.meter_number
 			END) as no_data_7days
 		`, sevenDaysAgo).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.last_consumption_date < ? THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.last_consumption_date < ? THEN mtr.meter_number
 			END) as no_data_30days
 		`, thirtyDaysAgo).
 		Join(`
 			LEFT JOIN (
-				SELECT 
+				SELECT
 					meter_number,
 					MAX(consumption_date) as last_consumption_date,
-					(COUNT(DISTINCT CASE WHEN data_item_id = '00100000' THEN DATE(consumption_date) END) * 100.0 / 
+					(COUNT(DISTINCT CASE WHEN data_item_id = '00100000' THEN DATE(consumption_date) END) * 100.0 /
 					 ?) as uptime_percentage
 				FROM app.meter_consumption_daily
 				WHERE consumption_date BETWEEN ? AND ?
@@ -2504,25 +2504,25 @@ func (s *MeterService) GetMeterHealthMetrics(
 		Column("mtr.meter_type").
 		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total").
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage >= ? THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage >= ? THEN mtr.meter_number
 			END) as healthy
 		`, healthyThreshold).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage >= ? AND mcd.uptime_percentage < ? THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage >= ? AND mcd.uptime_percentage < ? THEN mtr.meter_number
 			END) as warning
 		`, warningThreshold, healthyThreshold).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage < ? OR mcd.uptime_percentage IS NULL THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage < ? OR mcd.uptime_percentage IS NULL THEN mtr.meter_number
 			END) as critical
 		`, warningThreshold).
 		Join(`
 			LEFT JOIN (
-				SELECT 
+				SELECT
 					meter_number,
-					(COUNT(DISTINCT CASE WHEN data_item_id = '00100000' THEN DATE(consumption_date) END) * 100.0 / 
+					(COUNT(DISTINCT CASE WHEN data_item_id = '00100000' THEN DATE(consumption_date) END) * 100.0 /
 					 ?) as uptime_percentage
 				FROM app.meter_consumption_daily
 				WHERE consumption_date BETWEEN ? AND ?
@@ -2806,7 +2806,7 @@ func (s *MeterService) GetMeterSpatialStats(ctx context.Context) (map[string]int
 
 	err := s.db.NewRaw(`
 		WITH spatial_join AS (
-			SELECT 
+			SELECT
 				m.*,
 				e.region AS service_area_region,
 				e.district AS service_area_district
@@ -2893,13 +2893,13 @@ func (s *MeterService) GetMeterSpatialCounts(
 	// Build query
 	q := s.db.NewSelect().
 		TableExpr(`(
-			SELECT 
+			SELECT
 				m.*,
 				e.region AS service_area_region,
 				e.district AS service_area_district,
-				CASE 
-					WHEN LOWER(m.region) != LOWER(e.region) OR LOWER(m.district) != LOWER(e.district) 
-					THEN 1 ELSE 0 
+				CASE
+					WHEN LOWER(m.region) != LOWER(e.region) OR LOWER(m.district) != LOWER(e.district)
+					THEN 1 ELSE 0
 				END AS is_mismatched
 			FROM app.meters m
 			LEFT JOIN app.dbo_ecg e ON ST_Intersects(
@@ -3049,13 +3049,13 @@ func (s *MeterService) GetTopBottomConsumers(
 		ColumnExpr("mtr.feeder_panel_name").
 		ColumnExpr("mtr.voltage_kv").
 		ColumnExpr(`ROUND(
-			SUM(mcd.consumption) 
-			FILTER (WHERE dim.name = 'Active Energy -Import [Register] [Total](Unit:kWh)')::numeric, 
+			SUM(mcd.consumption)
+			FILTER (WHERE dim.name = 'Active Energy -Import [Register] [Total](Unit:kWh)')::numeric,
 			4
 		) as total_import_kwh`).
 		ColumnExpr(`ROUND(
-			SUM(mcd.consumption) 
-			FILTER (WHERE dim.name = 'Active Energy -Export [Register] [Total](Unit:kWh)')::numeric, 
+			SUM(mcd.consumption)
+			FILTER (WHERE dim.name = 'Active Energy -Export [Register] [Total](Unit:kWh)')::numeric,
 			4
 		) as total_export_kwh`).
 		ColumnExpr("COUNT(*) as reading_count").
@@ -3152,52 +3152,61 @@ func (s *MeterService) GetMeterHealthSummary(
 
 	// Main query for overall health metrics
 	q := s.db.NewSelect().
-		TableExpr("app.meters AS mtr").
-		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
-		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.has_actual_data = true THEN mtr.meter_number 
-			END) as online_meters
-		`).
-		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.has_actual_data = false OR mcd.meter_number IS NULL THEN mtr.meter_number 
-			END) as offline_meters
-		`).
-		ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
-		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage > 95 THEN mtr.meter_number 
-			END) as excellent
-		`).
-		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage >= 80 AND mcd.uptime_percentage <= 95 THEN mtr.meter_number 
-			END) as good
-		`).
-		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage >= 60 AND mcd.uptime_percentage < 80 THEN mtr.meter_number 
-			END) as poor
-		`).
-		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.uptime_percentage < 60 THEN mtr.meter_number 
-			END) as critical
-		`).
-		Join(`
-			LEFT JOIN (
-				SELECT 
-					meter_number,
-					MAX(consumption_date) as last_consumption_date,
-					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
-					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 / 
-					 ?) as uptime_percentage
-				FROM app.meter_consumption_daily
-				WHERE consumption_date BETWEEN ? AND ?
-				GROUP BY meter_number
-			) AS mcd ON mtr.meter_number = mcd.meter_number
-		`, daysInRange, params.DateFrom, params.DateTo)
+    TableExpr("app.meters AS mtr").
+    ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.has_actual_data = true THEN mtr.meter_number
+        END) as online_meters
+    `).
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.has_actual_data = false OR mcd.meter_number IS NULL THEN mtr.meter_number
+        END) as offline_meters
+    `).
+    ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.uptime_percentage > 95 THEN mtr.meter_number
+        END) as excellent
+    `).
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.uptime_percentage >= 80 AND mcd.uptime_percentage <= 95 THEN mtr.meter_number
+        END) as good
+    `).
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.uptime_percentage >= 60 AND mcd.uptime_percentage < 80 THEN mtr.meter_number
+        END) as poor
+    `).
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.uptime_percentage < 60 THEN mtr.meter_number
+        END) as critical
+    `).
+    Join(`
+        LEFT JOIN (
+            SELECT
+                meter_number,
+                BOOL_OR(data_item_id != 'NO_DATA') AS has_actual_data,
+                (
+                    COUNT(DISTINCT CASE
+                        WHEN data_item_id != 'NO_DATA'
+                        THEN DATE(consumption_date)
+                    END) * 100.0
+                    /
+                    NULLIF(
+                        COUNT(DISTINCT DATE(consumption_date)),
+                        0
+                    )
+                ) AS uptime_percentage
+            FROM app.meter_consumption_daily
+            WHERE consumption_date BETWEEN ? AND ?
+            GROUP BY meter_number
+        ) AS mcd ON mtr.meter_number = mcd.meter_number
+    `, params.DateFrom, params.DateTo)
+
 
 	// Apply meter filters (skip date filters since they're in the subquery)
 	for _, f := range filters {
@@ -3229,22 +3238,22 @@ func (s *MeterService) GetMeterHealthSummary(
 		Column("mtr.meter_type").
 		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total").
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.has_actual_data = true THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.has_actual_data = true THEN mtr.meter_number
 			END) as online
 		`).
 		ColumnExpr(`
-			COUNT(DISTINCT CASE 
-				WHEN mcd.has_actual_data = false OR mcd.meter_number IS NULL THEN mtr.meter_number 
+			COUNT(DISTINCT CASE
+				WHEN mcd.has_actual_data = false OR mcd.meter_number IS NULL THEN mtr.meter_number
 			END) as offline
 		`).
 		ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
 		Join(`
 			LEFT JOIN (
-				SELECT 
+				SELECT
 					meter_number,
 					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
-					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 / 
+					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 /
 					 ?) as uptime_percentage
 				FROM app.meter_consumption_daily
 				WHERE consumption_date BETWEEN ? AND ?
@@ -3324,13 +3333,13 @@ func (s *MeterService) GetMeterHealthDetails(
 		Column("mtr.voltage_kv").
 		Column("mtr.boundary_metering_point").
 		ColumnExpr(`
-			CASE 
+			CASE
 				WHEN mcd.has_actual_data = true THEN 'ONLINE'
 				ELSE 'OFFLINE'
 			END as status
 		`).
 		ColumnExpr(`
-			CASE 
+			CASE
 				WHEN mcd.uptime_percentage > 95 THEN 'excellent'
 				WHEN mcd.uptime_percentage >= 80 AND mcd.uptime_percentage <= 95 THEN 'good'
 				WHEN mcd.uptime_percentage >= 60 AND mcd.uptime_percentage < 80 THEN 'poor'
@@ -3345,26 +3354,47 @@ func (s *MeterService) GetMeterHealthDetails(
 		ColumnExpr("mcd.last_seen_date").
 		ColumnExpr("COALESCE(mcd.total_consumption, 0) as total_consumption_kwh").
 		ColumnExpr(`
-			CASE 
+			CASE
 				WHEN mcd.days_online > 0 THEN ROUND((mcd.total_consumption / mcd.days_online)::numeric, 2)
 				ELSE 0
 			END as avg_daily_consumption
 		`).
 		Join(`
-			LEFT JOIN (
-				SELECT 
-					meter_number,
-					MAX(consumption_date) as last_seen_date,
-					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
-					COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) as days_online,
-					? - COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) as days_offline,
-					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 / ?) as uptime_percentage,
-					SUM(consumption) as total_consumption
-				FROM app.meter_consumption_daily
-				WHERE consumption_date BETWEEN ? AND ?
-				GROUP BY meter_number
-			) AS mcd ON mtr.meter_number = mcd.meter_number
-		`, daysInRange, daysInRange, params.DateFrom, params.DateTo)
+    LEFT JOIN (
+        SELECT
+            meter_number,
+            MAX(consumption_date) AS last_seen_date,
+            BOOL_OR(data_item_id != 'NO_DATA') AS has_actual_data,
+
+            COUNT(DISTINCT CASE
+                WHEN data_item_id != 'NO_DATA'
+                THEN DATE(consumption_date)
+            END) AS days_online,
+
+            COUNT(DISTINCT DATE(consumption_date))
+            - COUNT(DISTINCT CASE
+                WHEN data_item_id != 'NO_DATA'
+                THEN DATE(consumption_date)
+            END) AS days_offline,
+
+            COUNT(DISTINCT DATE(consumption_date)) AS total_days,
+
+            (
+                COUNT(DISTINCT CASE
+                    WHEN data_item_id != 'NO_DATA'
+                    THEN DATE(consumption_date)
+                END) * 100.0
+                /
+                NULLIF(COUNT(DISTINCT DATE(consumption_date)), 0)
+            ) AS uptime_percentage,
+
+            SUM(consumption) AS total_consumption
+        FROM app.meter_consumption_daily
+        WHERE consumption_date BETWEEN ? AND ?
+        GROUP BY meter_number
+    ) AS mcd ON mtr.meter_number = mcd.meter_number
+`, params.DateFrom, params.DateTo)
+
 
 	// Apply meter filters (skip date filters since they're in the subquery)
 	for _, f := range filters {
@@ -3733,7 +3763,7 @@ func (s *MeterService) GetRegionalMapConsumption(
 	queryBuilder.WriteString(`
         WITH district_consumption AS (
             -- Try spatial join first (coordinates available)
-            SELECT 
+            SELECT
                 d.district,
                 d.region,
                 m.meter_type,
@@ -3749,14 +3779,14 @@ func (s *MeterService) GetRegionalMapConsumption(
                 COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh,
                 'spatial' as match_type
             FROM app.dbo_ecg d
-            INNER JOIN app.meters m 
+            INNER JOIN app.meters m
                 ON ST_Intersects(d.the_geom, ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326))
-                AND m.latitude IS NOT NULL 
+                AND m.latitude IS NOT NULL
                 AND m.longitude IS NOT NULL
-            LEFT JOIN app.meter_consumption_daily mcd 
+            LEFT JOIN app.meter_consumption_daily mcd
                 ON m.meter_number = mcd.meter_number
                 AND mcd.consumption_date BETWEEN ? AND ?
-            LEFT JOIN app.data_item_mapping dim 
+            LEFT JOIN app.data_item_mapping dim
                 ON mcd.data_item_id = dim.data_item_id
             WHERE d.district IS NOT NULL
                 AND d.region IS NOT NULL
@@ -3784,14 +3814,14 @@ func (s *MeterService) GetRegionalMapConsumption(
 
 	// Close first UNION and start second
 	queryBuilder.WriteString(`
-            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station, 
-                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name, 
+            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station,
+                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name,
                      m.ic_og, DATE(mcd.consumption_date)
-            
+
             UNION ALL
-            
+
             -- Fallback: District name matching (for meters without coordinates or not intersecting)
-            SELECT 
+            SELECT
                 d.district,
                 d.region,
                 m.meter_type,
@@ -3807,13 +3837,13 @@ func (s *MeterService) GetRegionalMapConsumption(
                 COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh,
                 'district_name' as match_type
             FROM app.dbo_ecg d
-            INNER JOIN app.meters m 
+            INNER JOIN app.meters m
                 ON LOWER(TRIM(d.district)) = LOWER(TRIM(m.district))
                 AND (m.latitude IS NULL OR m.longitude IS NULL)  -- Only meters without coordinates
-            LEFT JOIN app.meter_consumption_daily mcd 
+            LEFT JOIN app.meter_consumption_daily mcd
                 ON m.meter_number = mcd.meter_number
                 AND mcd.consumption_date BETWEEN ? AND ?
-            LEFT JOIN app.data_item_mapping dim 
+            LEFT JOIN app.data_item_mapping dim
                 ON mcd.data_item_id = dim.data_item_id
             WHERE d.district IS NOT NULL
                 AND d.region IS NOT NULL
@@ -3842,14 +3872,14 @@ func (s *MeterService) GetRegionalMapConsumption(
 
 	// Close second UNION and start third
 	queryBuilder.WriteString(`
-            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station, 
-                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name, 
+            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station,
+                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name,
                      m.ic_og, DATE(mcd.consumption_date)
-            
+
             UNION ALL
-            
+
             -- Fallback 2: Region name matching (if district doesn't match but region does)
-            SELECT 
+            SELECT
                 d.district,
                 d.region,
                 m.meter_type,
@@ -3865,13 +3895,13 @@ func (s *MeterService) GetRegionalMapConsumption(
                 COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh,
                 'region_name' as match_type
             FROM app.dbo_ecg d
-            INNER JOIN app.meters m 
+            INNER JOIN app.meters m
                 ON LOWER(TRIM(d.region)) = LOWER(TRIM(m.region))
                 AND m.district IS NULL  -- Only meters with NULL district
-            LEFT JOIN app.meter_consumption_daily mcd 
+            LEFT JOIN app.meter_consumption_daily mcd
                 ON m.meter_number = mcd.meter_number
                 AND mcd.consumption_date BETWEEN ? AND ?
-            LEFT JOIN app.data_item_mapping dim 
+            LEFT JOIN app.data_item_mapping dim
                 ON mcd.data_item_id = dim.data_item_id
             WHERE d.district IS NOT NULL
                 AND d.region IS NOT NULL
@@ -3900,11 +3930,11 @@ func (s *MeterService) GetRegionalMapConsumption(
 
 	// Close the CTE and add final SELECT
 	queryBuilder.WriteString(`
-            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station, 
-                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name, 
+            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station,
+                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name,
                      m.ic_og, DATE(mcd.consumption_date)
         )
-        SELECT 
+        SELECT
             district,
             region,
             meter_type,
@@ -4231,32 +4261,32 @@ func (s *MeterService) GetRegionalEnergyBalance(
 
 	// Build the complete energy balance query
 	query := `
-		WITH 
+		WITH
 		-- 0. Get valid regions from m.region (BSP/DTX meters only - our source of truth)
 		valid_regions AS (
 			SELECT DISTINCT LOWER(TRIM(region)) as region_name
 			FROM app.meters
-			WHERE region IS NOT NULL 
+			WHERE region IS NOT NULL
 			  AND TRIM(region) != ''
 			  AND meter_type IN ('BSP', 'DTX')
 		),
 		-- 1. Internal consumption (BSP - DTX) for each region
 		internal_consumption AS (
-			SELECT 
+			SELECT
 				COALESCE(LOWER(m.region), 'unknown') as region,
 				DATE(mcd.consumption_date) as date,
-				SUM(CASE WHEN m.meter_type = 'BSP' AND di.system_name = 'import_kwh' 
+				SUM(CASE WHEN m.meter_type = 'BSP' AND di.system_name = 'import_kwh'
 						 THEN mcd.consumption ELSE 0 END) as bsp_import,
-				SUM(CASE WHEN m.meter_type = 'DTX' AND di.system_name = 'import_kwh' 
+				SUM(CASE WHEN m.meter_type = 'DTX' AND di.system_name = 'import_kwh'
 						 THEN mcd.consumption ELSE 0 END) as dtx_import,
-				SUM(CASE WHEN m.meter_type = 'BSP' AND di.system_name = 'import_kwh' 
-						 THEN mcd.consumption 
-						 WHEN m.meter_type = 'DTX' AND di.system_name = 'import_kwh' 
-						 THEN -mcd.consumption 
+				SUM(CASE WHEN m.meter_type = 'BSP' AND di.system_name = 'import_kwh'
+						 THEN mcd.consumption
+						 WHEN m.meter_type = 'DTX' AND di.system_name = 'import_kwh'
+						 THEN -mcd.consumption
 						 ELSE 0 END) as internal_net,
 				COUNT(DISTINCT CASE WHEN m.meter_type = 'BSP' THEN m.meter_number END) as bsp_meter_count,
 				COUNT(DISTINCT CASE WHEN m.meter_type = 'DTX' THEN m.meter_number END) as dtx_meter_count
-			FROM app.meter_consumption_daily mcd 
+			FROM app.meter_consumption_daily mcd
 			JOIN app.meters m ON m.meter_number = mcd.meter_number
 			JOIN app.data_item_mapping di ON di.data_item_id = mcd.data_item_id
 			WHERE ` + internalWhereClause + `
@@ -4264,7 +4294,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 		),
 		-- 2. Parse boundary metering points
 		boundary_flows_parsed AS (
-			SELECT 
+			SELECT
 				DATE(mcd.consumption_date) as date,
 				m.meter_number,
 				m.boundary_metering_point,
@@ -4275,16 +4305,16 @@ func (s *MeterService) GetRegionalEnergyBalance(
 				SUM(CASE WHEN di.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END) as import_kwh,
 				SUM(CASE WHEN di.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END) as export_kwh,
 				COUNT(*) as reading_count,
-				CASE 
+				CASE
 					WHEN COUNT(*) >= 48 THEN 'complete'
 					WHEN COUNT(*) >= 24 THEN 'partial'
 					ELSE 'incomplete'
 				END as data_quality
-			FROM app.meter_consumption_daily mcd 
+			FROM app.meter_consumption_daily mcd
 			JOIN app.meters m ON m.meter_number = mcd.meter_number
 			JOIN app.data_item_mapping di ON di.data_item_id = mcd.data_item_id
 			WHERE ` + boundaryWhereClause + `
-			GROUP BY 
+			GROUP BY
 				DATE(mcd.consumption_date),
 				m.meter_number,
 				m.boundary_metering_point,
@@ -4293,7 +4323,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 		),
 		-- 3. Validate that BOTH regions exist in valid_regions
 		boundary_flows_validated AS (
-			SELECT 
+			SELECT
 				bfp.*,
 				EXISTS (SELECT 1 FROM valid_regions WHERE region_name = bfp.region_a) as region_a_valid,
 				EXISTS (SELECT 1 FROM valid_regions WHERE region_name = bfp.region_b) as region_b_valid
@@ -4302,7 +4332,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 		-- 4. Create boundary flow entries for BOTH regions (if both valid)
 		boundary_flows_per_region AS (
 			-- Entries for region_a
-			SELECT 
+			SELECT
 				date,
 				region_a as region,
 				meter_number,
@@ -4319,11 +4349,11 @@ func (s *MeterService) GetRegionalEnergyBalance(
 				region_b_valid
 			FROM boundary_flows_validated
 			WHERE region_a_valid = true
-			
+
 			UNION ALL
-			
+
 			-- Entries for region_b (swapped perspective)
-			SELECT 
+			SELECT
 				date,
 				region_b as region,
 				meter_number,
@@ -4343,7 +4373,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 		),
 		-- 5. Build boundary meter details for each region
 		boundary_meter_details AS (
-			SELECT 
+			SELECT
 				date,
 				region,
 				jsonb_agg(
@@ -4365,7 +4395,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 		),
 		-- 6. Aggregate by connected region AND location
 		boundary_by_connected_region_and_location AS (
-			SELECT 
+			SELECT
 				date,
 				region,
 				connected_region,
@@ -4378,7 +4408,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 		),
 		-- 6b. Aggregate totals by connected region (without location)
 		boundary_by_connected_region AS (
-			SELECT 
+			SELECT
 				date,
 				region,
 				connected_region,
@@ -4390,7 +4420,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 		),
 		-- 7. Build by_location map for each connected region
 		boundary_location_map AS (
-			SELECT 
+			SELECT
 				date,
 				region,
 				connected_region,
@@ -4408,7 +4438,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 		),
 		-- 8. Build by_connected_region JSON map with location breakdown
 		boundary_connected_region_map AS (
-			SELECT 
+			SELECT
 				bcr.date,
 				bcr.region,
 				jsonb_object_agg(
@@ -4418,7 +4448,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 						'total_import_from_them', bcr.total_import_from_region,
 						'total_export_to_them', bcr.total_export_to_region,
 						'net_flow', bcr.net_flow,
-						'flow_balance', CASE 
+						'flow_balance', CASE
 							WHEN bcr.net_flow > 10 THEN 'importing'
 							WHEN bcr.net_flow < -10 THEN 'exporting'
 							ELSE 'balanced'
@@ -4427,15 +4457,15 @@ func (s *MeterService) GetRegionalEnergyBalance(
 					)
 				) as by_connected_region_json
 			FROM boundary_by_connected_region bcr
-			LEFT JOIN boundary_location_map blm 
-				ON bcr.date = blm.date 
-				AND bcr.region = blm.region 
+			LEFT JOIN boundary_location_map blm
+				ON bcr.date = blm.date
+				AND bcr.region = blm.region
 				AND bcr.connected_region = blm.connected_region
 			GROUP BY bcr.date, bcr.region
 		),
 		-- 9. Aggregate total boundary flows by region
 		boundary_totals AS (
-			SELECT 
+			SELECT
 				date,
 				region,
 				SUM(import_kwh) as total_import,
@@ -4446,7 +4476,7 @@ func (s *MeterService) GetRegionalEnergyBalance(
 			GROUP BY date, region
 		)
 		-- 10. Final result combining internal consumption and boundary flows
-		SELECT 
+		SELECT
 			COALESCE(i.region, b.region) as region,
 			COALESCE(i.date, b.date) as date,
 			-- Internal consumption
@@ -4465,13 +4495,13 @@ func (s *MeterService) GetRegionalEnergyBalance(
 			-- Total
 			COALESCE(i.internal_net, 0) + COALESCE(b.net_boundary_flow, 0) as total_net_consumption
 		FROM internal_consumption i
-		FULL OUTER JOIN boundary_totals b 
+		FULL OUTER JOIN boundary_totals b
 			ON i.region = b.region AND i.date = b.date
 		LEFT JOIN boundary_meter_details bmd
-			ON COALESCE(i.region, b.region) = bmd.region 
+			ON COALESCE(i.region, b.region) = bmd.region
 			AND COALESCE(i.date, b.date) = bmd.date
 		LEFT JOIN boundary_connected_region_map bcr
-			ON COALESCE(i.region, b.region) = bcr.region 
+			ON COALESCE(i.region, b.region) = bcr.region
 			AND COALESCE(i.date, b.date) = bcr.date
 		WHERE COALESCE(i.region, b.region) IS NOT NULL
 			AND COALESCE(i.date, b.date) IS NOT NULL
@@ -4871,7 +4901,7 @@ func (s *MeterService) GetRegionGeometries(
                 ),
                 'geometry', ST_AsGeoJSON(
                     ST_SimplifyPreserveTopology(
-                        ST_Union(d.the_geom), 
+                        ST_Union(d.the_geom),
                         0.001  -- Simplify to ~111m tolerance
                     )
                 )::jsonb
@@ -4934,12 +4964,12 @@ func (s *MeterService) GetDistrictTimeseriesConsumption(
                 m.meter_number
             FROM app.meters m
             -- Try spatial join first
-            LEFT JOIN app.dbo_ecg d_spatial 
+            LEFT JOIN app.dbo_ecg d_spatial
                 ON ST_Intersects(d_spatial.the_geom, ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326))
-                AND m.latitude IS NOT NULL 
+                AND m.latitude IS NOT NULL
                 AND m.longitude IS NOT NULL
             -- Fallback to name matching
-            LEFT JOIN app.dbo_ecg d_name 
+            LEFT JOIN app.dbo_ecg d_name
                 ON LOWER(TRIM(d_name.district)) = LOWER(TRIM(m.district))
                 AND LOWER(TRIM(d_name.region)) = LOWER(TRIM(m.region))
             WHERE m.meter_type IS NOT NULL
@@ -4975,14 +5005,14 @@ func (s *MeterService) GetDistrictTimeseriesConsumption(
                 COALESCE(SUM(CASE WHEN dim.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_import_kwh,
                 COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh
             FROM district_meters dm
-            INNER JOIN app.meter_consumption_daily mcd 
+            INNER JOIN app.meter_consumption_daily mcd
                 ON dm.meter_number = mcd.meter_number
                 AND mcd.consumption_date BETWEEN ? AND ?
-            LEFT JOIN app.data_item_mapping dim 
+            LEFT JOIN app.data_item_mapping dim
                 ON mcd.data_item_id = dim.data_item_id
             GROUP BY dm.district, dm.region, DATE(mcd.consumption_date)
         )
-        SELECT 
+        SELECT
             district,
             region,
             timestamp,

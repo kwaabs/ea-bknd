@@ -2117,23 +2117,40 @@ func (s *MeterService) GetMeterStatusTimeline(
 	var entries []models.MeterStatusTimelineEntry
 
 	err := s.db.NewSelect().
-		ColumnExpr("date").
-		ColumnExpr("COUNT(DISTINCT CASE WHEN is_online THEN meter_number END) as online").
-		ColumnExpr("COUNT(DISTINCT CASE WHEN NOT is_online THEN meter_number END) as offline").
-		ColumnExpr("COUNT(DISTINCT meter_number) as total").
-		TableExpr(`(
-			SELECT
-				DATE(mcd.consumption_date) as date,
-				mcd.meter_number,
-				BOOL_OR(mcd.data_item_id != 'NO_DATA') as is_online
-			FROM app.meter_consumption_daily AS mcd
-			WHERE mcd.consumption_date BETWEEN ? AND ?
-			  AND mcd.meter_number IN (?)
-			GROUP BY DATE(mcd.consumption_date), mcd.meter_number
-		) AS daily_status`, params.DateFrom, params.DateTo, meterSubquery).
-		Group("date").
-		Order("date ASC").
-		Scan(ctx, &entries)
+    ColumnExpr("date").
+    ColumnExpr("COUNT(*) FILTER (WHERE is_online) AS online").
+    ColumnExpr("COUNT(*) FILTER (WHERE NOT is_online OR is_online IS NULL) AS offline").
+    ColumnExpr("COUNT(*) AS total").
+    TableExpr(`(
+        SELECT
+            d.date,
+            mtr.meter_number,
+            BOOL_OR(mcd.data_item_id != 'NO_DATA') AS is_online
+        FROM (
+            SELECT generate_series(
+                DATE(?),
+                DATE(?),
+                interval '1 day'
+            )::date AS date
+        ) d
+        CROSS JOIN (
+            SELECT mtr.meter_number
+            FROM app.meters mtr
+            WHERE mtr.meter_number IN (?)
+        ) mtr
+        LEFT JOIN app.meter_consumption_daily mcd
+          ON DATE(mcd.consumption_date) = d.date
+         AND mcd.meter_number = mtr.meter_number
+        GROUP BY d.date, mtr.meter_number
+    ) AS daily_status`,
+        params.DateFrom,
+        params.DateTo,
+        meterSubquery,
+    ).
+    Group("date").
+    Order("date ASC").
+    Scan(ctx, &entries)
+
 
 	if err != nil {
 		return nil, err
@@ -5084,6 +5101,534 @@ func (s *MeterService) GetDistrictTimeseriesConsumption(
 		Districts: districts,
 	}, nil
 }
+
+
+
+
+// // GetRegionMetadata returns comprehensive metadata for a specific region
+// // including districts with their boundary metering points and locations
+// func (s *MeterService) GetRegionMetadata(
+// 	ctx context.Context,
+// 	region string,
+// ) (*models.RegionMetadata, error) {
+
+// 	// Normalize the input region name
+// 	regionClean := strings.ToLower(strings.TrimSpace(region))
+
+// 	query := `
+// 		WITH ecg_clean AS (
+// 			SELECT
+// 				district_name,
+// 				region,
+// 				LOWER(REGEXP_REPLACE(region, '^[0-9]+\s*-\s*|\s+Region$', '', 'gi')) AS region_clean
+// 			FROM dbo_ecg_24012026
+// 			WHERE region IS NOT NULL
+// 		),
+// 		meters_clean AS (
+// 			SELECT
+// 				meter_number,
+// 				meter_type,
+// 				station,
+// 				boundary_metering_point,
+// 				location,
+// 				district,
+// 				LOWER(TRIM(region)) AS region_clean
+// 			FROM app.meters
+// 			WHERE region IS NOT NULL AND region <> ''
+// 		),
+// 		-- Meters matched by region name
+// 		region_meters AS (
+// 			SELECT DISTINCT
+// 				m.meter_number,
+// 				m.meter_type,
+// 				m.station,
+// 				m.boundary_metering_point,
+// 				m.location,
+// 				m.district AS meter_district,
+// 				e.district_name AS ecg_district
+// 			FROM ecg_clean e
+// 			JOIN meters_clean m ON e.region_clean = m.region_clean
+// 			WHERE e.region_clean = ?
+// 		),
+// 		-- Regional boundary meters matched by boundary_metering_point LIKE pattern
+// 		regional_boundary_meters AS (
+// 			SELECT DISTINCT
+// 				meter_number,
+// 				meter_type,
+// 				station,
+// 				boundary_metering_point,
+// 				location,
+// 				district AS meter_district
+// 			FROM app.meters
+// 			WHERE meter_type = 'REGIONAL_BOUNDARY'
+// 			  AND boundary_metering_point IS NOT NULL
+// 			  AND LOWER(boundary_metering_point) LIKE '%' || ? || '%'
+// 		),
+// 		-- All meters for the region (excluding district boundary - handled separately)
+// 		all_region_meters AS (
+// 			SELECT * FROM region_meters WHERE meter_type != 'DISTRICT_BOUNDARY'
+// 			UNION
+// 			SELECT
+// 				meter_number,
+// 				meter_type,
+// 				station,
+// 				boundary_metering_point,
+// 				location,
+// 				meter_district,
+// 				NULL AS ecg_district
+// 			FROM regional_boundary_meters
+// 		)
+// 		SELECT
+// 			-- Districts from ECG (spatial boundaries)
+// 			(
+// 				SELECT jsonb_agg(DISTINCT district_name ORDER BY district_name)
+// 				FROM ecg_clean
+// 				WHERE region_clean = ?
+// 				  AND district_name IS NOT NULL
+// 			) AS ecg_districts,
+
+// 			-- Districts from meters (meter assignments)
+// 			(
+// 				SELECT jsonb_agg(DISTINCT LOWER(TRIM(meter_district)) ORDER BY LOWER(TRIM(meter_district)))
+// 				FROM all_region_meters
+// 				WHERE meter_district IS NOT NULL AND meter_district <> ''
+// 			) AS meter_districts,
+
+// 			-- Stations (for BSP, DTX, PSS, SS meters)
+// 			(
+// 				SELECT jsonb_agg(DISTINCT LOWER(TRIM(station)) ORDER BY LOWER(TRIM(station)))
+// 				FROM all_region_meters
+// 				WHERE station IS NOT NULL AND station <> ''
+// 			) AS stations,
+
+// 			-- Meter types
+// 			(
+// 				SELECT jsonb_agg(DISTINCT meter_type ORDER BY meter_type)
+// 				FROM all_region_meters
+// 				WHERE meter_type IS NOT NULL
+// 			) AS meter_types,
+
+// 			-- Regional boundary metering points with locations
+// 			(
+// 				SELECT jsonb_agg(
+// 					jsonb_build_object(
+// 						'boundary_metering_point', LOWER(TRIM(boundary_metering_point)),
+// 						'locations', locations_array
+// 					) ORDER BY LOWER(TRIM(boundary_metering_point))
+// 				)
+// 				FROM (
+// 					SELECT
+// 						boundary_metering_point,
+// 						jsonb_agg(DISTINCT LOWER(TRIM(location)) ORDER BY LOWER(TRIM(location)))
+// 							FILTER (WHERE location IS NOT NULL AND location <> '') AS locations_array
+// 					FROM regional_boundary_meters
+// 					WHERE boundary_metering_point IS NOT NULL AND boundary_metering_point <> ''
+// 					GROUP BY boundary_metering_point
+// 				) AS regional_boundaries
+// 			) AS regional_boundary_metering_points,
+
+// 			-- Total meter count (excluding district boundary for now)
+// 			(
+// 				SELECT COUNT(DISTINCT meter_number)
+// 				FROM all_region_meters
+// 			) AS total_meter_count,
+
+// 			-- Meter count by type (excluding district boundary for now)
+// 			(
+// 				SELECT jsonb_object_agg(meter_type, meter_count ORDER BY meter_type)
+// 				FROM (
+// 					SELECT meter_type, COUNT(DISTINCT meter_number) AS meter_count
+// 					FROM all_region_meters
+// 					WHERE meter_type IS NOT NULL
+// 					GROUP BY meter_type
+// 				) AS type_counts
+// 			) AS meter_count_by_type
+// 	`
+
+// 	type rawResult struct {
+// 		ECGDistricts                   json.RawMessage `bun:"ecg_districts"`
+// 		MeterDistricts                 json.RawMessage `bun:"meter_districts"`
+// 		Stations                       json.RawMessage `bun:"stations"`
+// 		MeterTypes                     json.RawMessage `bun:"meter_types"`
+// 		RegionalBoundaryMeteringPoints json.RawMessage `bun:"regional_boundary_metering_points"`
+// 		TotalMeterCount                int             `bun:"total_meter_count"`
+// 		MeterCountByType               json.RawMessage `bun:"meter_count_by_type"`
+// 	}
+
+// 	var result rawResult
+// 	// Pass regionClean 3 times: region_meters WHERE, regional_boundary LIKE, ecg_districts
+// 	err := s.db.NewRaw(query, regionClean, regionClean, regionClean).Scan(ctx, &result)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get region metadata: %w", err)
+// 	}
+
+// 	// Parse JSON arrays
+// 	var ecgDistricts, meterDistricts, stations, meterTypes []string
+// 	var regionalBoundaryPoints []models.BoundaryMeteringPointWithLocations
+// 	var meterCountByType map[string]int
+
+// 	// Helper to safely unmarshal JSON arrays
+// 	unmarshalArray := func(data json.RawMessage, target interface{}) {
+// 		if len(data) > 0 && string(data) != "null" {
+// 			json.Unmarshal(data, target)
+// 		}
+// 	}
+
+// 	unmarshalArray(result.ECGDistricts, &ecgDistricts)
+// 	unmarshalArray(result.MeterDistricts, &meterDistricts)
+// 	unmarshalArray(result.Stations, &stations)
+// 	unmarshalArray(result.MeterTypes, &meterTypes)
+// 	unmarshalArray(result.RegionalBoundaryMeteringPoints, &regionalBoundaryPoints)
+// 	unmarshalArray(result.MeterCountByType, &meterCountByType)
+
+// 	// Initialize empty slices if nil
+// 	if ecgDistricts == nil {
+// 		ecgDistricts = []string{}
+// 	}
+// 	if meterDistricts == nil {
+// 		meterDistricts = []string{}
+// 	}
+// 	if stations == nil {
+// 		stations = []string{}
+// 	}
+// 	if meterTypes == nil {
+// 		meterTypes = []string{}
+// 	}
+// 	if regionalBoundaryPoints == nil {
+// 		regionalBoundaryPoints = []models.BoundaryMeteringPointWithLocations{}
+// 	}
+// 	if meterCountByType == nil {
+// 		meterCountByType = make(map[string]int)
+// 	}
+
+// 	// Now get district-level details with their boundary metering points
+// 	districts, err := s.getDistrictsWithBoundaries(ctx, regionClean, ecgDistricts)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get district boundaries: %w", err)
+// 	}
+
+// 	// Add district boundary meter counts to totals
+// 	districtBoundaryMeterCount := 0
+// 	for _, district := range districts {
+// 		districtBoundaryMeterCount += district.MeterCount
+// 	}
+
+// 	return &models.RegionMetadata{
+// 		Region:                         region,
+// 		ECGDistricts:                   ecgDistricts,
+// 		MeterDistricts:                 meterDistricts,
+// 		Stations:                       stations,
+// 		MeterTypes:                     meterTypes,
+// 		RegionalBoundaryMeteringPoints: regionalBoundaryPoints,
+// 		Districts:                      districts,
+// 		TotalMeterCount:                result.TotalMeterCount + districtBoundaryMeterCount,
+// 		MeterCountByType:               meterCountByType,
+// 	}, nil
+// }
+
+// // getDistrictsWithBoundaries is a helper function to get district boundary details
+// func (s *MeterService) getDistrictsWithBoundaries(
+// 	ctx context.Context,
+// 	regionClean string,
+// 	districtNames []string,
+// ) ([]models.DistrictWithBoundaries, error) {
+
+// 	if len(districtNames) == 0 {
+// 		return []models.DistrictWithBoundaries{}, nil
+// 	}
+
+// 	// Build district name list for LIKE matching
+// 	var districts []models.DistrictWithBoundaries
+
+// 	for _, districtName := range districtNames {
+// 		// Clean district name: strip "District", "Municipal", "Metro" suffixes
+// 		districtClean := strings.ToLower(strings.TrimSpace(districtName))
+// 		// Remove suffixes using regex in Go
+// 		districtClean = strings.TrimSpace(
+// 			regexp.MustCompile(`(?i)\s+(district|municipal|metro)$`).ReplaceAllString(districtClean, ""),
+// 		)
+
+// 		query := `
+// 			SELECT
+// 				jsonb_agg(
+// 					jsonb_build_object(
+// 						'boundary_metering_point', LOWER(TRIM(boundary_metering_point)),
+// 						'locations', locations_array
+// 					) ORDER BY LOWER(TRIM(boundary_metering_point))
+// 				) AS boundary_points,
+// 				COUNT(DISTINCT meter_number) AS meter_count
+// 			FROM (
+// 				SELECT
+// 					boundary_metering_point,
+// 					meter_number,
+// 					jsonb_agg(DISTINCT LOWER(TRIM(location)) ORDER BY LOWER(TRIM(location)))
+// 						FILTER (WHERE location IS NOT NULL AND location <> '') AS locations_array
+// 				FROM app.meters
+// 				WHERE meter_type = 'DISTRICT_BOUNDARY'
+// 				  AND boundary_metering_point IS NOT NULL
+// 				  AND LOWER(boundary_metering_point) LIKE '%' || ? || '%'
+// 				GROUP BY boundary_metering_point, meter_number
+// 			) AS district_boundaries
+// 		`
+
+// 		var result struct {
+// 			BoundaryPoints json.RawMessage `bun:"boundary_points"`
+// 			MeterCount     int             `bun:"meter_count"`
+// 		}
+
+// 		err := s.db.NewRaw(query, districtClean).Scan(ctx, &result)
+// 		if err != nil {
+// 			continue // Skip districts with errors
+// 		}
+
+// 		var boundaryPoints []models.BoundaryMeteringPointWithLocations
+// 		if len(result.BoundaryPoints) > 0 && string(result.BoundaryPoints) != "null" {
+// 			json.Unmarshal(result.BoundaryPoints, &boundaryPoints)
+// 		}
+
+// 		if boundaryPoints == nil {
+// 			boundaryPoints = []models.BoundaryMeteringPointWithLocations{}
+// 		}
+
+// 		districts = append(districts, models.DistrictWithBoundaries{
+// 			DistrictName:           districtName,
+// 			BoundaryMeteringPoints: boundaryPoints,
+// 			MeterCount:             result.MeterCount,
+// 		})
+// 	}
+
+// 	return districts, nil
+// }
+
+// // GetAllRegionsMetadata returns metadata for all regions
+// func (s *MeterService) GetAllRegionsMetadata(ctx context.Context) ([]models.RegionMetadata, error) {
+// 	// First get all unique regions from ECG table
+// 	var regions []string
+
+// 	query := `
+// 		SELECT DISTINCT LOWER(REGEXP_REPLACE(region, '^[0-9]+\s*-\s*|\s+Region$', '', 'gi')) AS region_clean
+// 		FROM dbo_ecg_24012026
+// 		WHERE region IS NOT NULL
+// 		ORDER BY region_clean
+// 	`
+
+// 	if err := s.db.NewRaw(query).Scan(ctx, &regions); err != nil {
+// 		return nil, fmt.Errorf("failed to get regions: %w", err)
+// 	}
+
+// 	// Get metadata for each region
+// 	var results []models.RegionMetadata
+// 	for _, region := range regions {
+// 		metadata, err := s.GetRegionMetadata(ctx, region)
+// 		if err != nil {
+// 			continue // Skip regions with errors
+// 		}
+// 		results = append(results, *metadata)
+// 	}
+
+// 	return results, nil
+// }
+
+// // GetRegionDistrictMetadata returns detailed metadata for a specific district within a region
+// func (s *MeterService) GetRegionDistrictMetadata(
+// 	ctx context.Context,
+// 	region string,
+// 	district string,
+// ) (*models.DistrictMetadata, error) {
+
+// 	regionClean := strings.ToLower(strings.TrimSpace(region))
+// 	districtClean := strings.ToLower(strings.TrimSpace(district))
+// 	// Remove suffixes: "District", "Municipal", "Metro" (case-insensitive)
+// 	districtCleanForSearch := strings.TrimSpace(
+// 		regexp.MustCompile(`(?i)\s+(district|municipal|metro)$`).ReplaceAllString(districtClean, ""),
+// 	)
+
+// 	query := `
+// 		WITH ecg_clean AS (
+// 			SELECT
+// 				district_name,
+// 				region,
+// 				LOWER(REGEXP_REPLACE(region, '^[0-9]+\s*-\s*|\s+Region$', '', 'gi')) AS region_clean,
+// 				LOWER(TRIM(district_name)) AS district_clean
+// 			FROM dbo_ecg_24012026
+// 			WHERE region IS NOT NULL AND district_name IS NOT NULL
+// 		),
+// 		meters_clean AS (
+// 			SELECT
+// 				meter_number,
+// 				meter_type,
+// 				station,
+// 				boundary_metering_point,
+// 				voltage_kv,
+// 				location,
+// 				LOWER(TRIM(region)) AS region_clean,
+// 				LOWER(TRIM(district)) AS district_clean
+// 			FROM app.meters
+// 			WHERE region IS NOT NULL AND district IS NOT NULL
+// 		),
+// 		-- Meters matched by region AND district name
+// 		district_meters_by_name AS (
+// 			SELECT DISTINCT
+// 				m.meter_number,
+// 				m.meter_type,
+// 				m.station,
+// 				m.boundary_metering_point,
+// 				m.voltage_kv,
+// 				m.location
+// 			FROM ecg_clean e
+// 			JOIN meters_clean m
+// 			  ON e.region_clean = m.region_clean
+// 			  AND e.district_clean = m.district_clean
+// 			WHERE e.region_clean = ?
+// 			  AND e.district_clean = ?
+// 		),
+// 		-- All district meters (excluding district boundary)
+// 		all_district_meters AS (
+// 			SELECT * FROM district_meters_by_name WHERE meter_type != 'DISTRICT_BOUNDARY'
+// 		)
+// 		SELECT
+// 			-- Stations
+// 			(
+// 				SELECT jsonb_agg(DISTINCT LOWER(TRIM(station)) ORDER BY LOWER(TRIM(station)))
+// 				FROM all_district_meters
+// 				WHERE station IS NOT NULL AND station <> ''
+// 			) AS stations,
+
+// 			-- Meter types
+// 			(
+// 				SELECT jsonb_agg(DISTINCT meter_type ORDER BY meter_type)
+// 				FROM all_district_meters
+// 				WHERE meter_type IS NOT NULL
+// 			) AS meter_types,
+
+// 			-- Voltage levels
+// 			(
+// 				SELECT jsonb_agg(DISTINCT voltage_kv ORDER BY voltage_kv)
+// 				FROM all_district_meters
+// 				WHERE voltage_kv IS NOT NULL
+// 			) AS voltage_levels,
+
+// 			-- Total meter count (excluding district boundary)
+// 			(
+// 				SELECT COUNT(DISTINCT meter_number)
+// 				FROM all_district_meters
+// 			) AS total_meter_count,
+
+// 			-- Meter count by type (excluding district boundary)
+// 			(
+// 				SELECT jsonb_object_agg(meter_type, meter_count ORDER BY meter_type)
+// 				FROM (
+// 					SELECT meter_type, COUNT(DISTINCT meter_number) AS meter_count
+// 					FROM all_district_meters
+// 					WHERE meter_type IS NOT NULL
+// 					GROUP BY meter_type
+// 				) AS type_counts
+// 			) AS meter_count_by_type
+// 	`
+
+// 	type rawResult struct {
+// 		Stations         json.RawMessage `bun:"stations"`
+// 		MeterTypes       json.RawMessage `bun:"meter_types"`
+// 		VoltageLevels    json.RawMessage `bun:"voltage_levels"`
+// 		TotalMeterCount  int             `bun:"total_meter_count"`
+// 		MeterCountByType json.RawMessage `bun:"meter_count_by_type"`
+// 	}
+
+// 	var result rawResult
+// 	err := s.db.NewRaw(query, regionClean, districtClean).Scan(ctx, &result)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get district metadata: %w", err)
+// 	}
+
+// 	// Parse JSON arrays
+// 	var stations, meterTypes []string
+// 	var voltageLevels []float64
+// 	var meterCountByType map[string]int
+
+// 	// Helper to safely unmarshal JSON arrays
+// 	unmarshalArray := func(data json.RawMessage, target interface{}) {
+// 		if len(data) > 0 && string(data) != "null" {
+// 			json.Unmarshal(data, target)
+// 		}
+// 	}
+
+// 	unmarshalArray(result.Stations, &stations)
+// 	unmarshalArray(result.MeterTypes, &meterTypes)
+// 	unmarshalArray(result.VoltageLevels, &voltageLevels)
+// 	unmarshalArray(result.MeterCountByType, &meterCountByType)
+
+// 	// Initialize empty slices if nil
+// 	if stations == nil {
+// 		stations = []string{}
+// 	}
+// 	if meterTypes == nil {
+// 		meterTypes = []string{}
+// 	}
+// 	if voltageLevels == nil {
+// 		voltageLevels = []float64{}
+// 	}
+// 	if meterCountByType == nil {
+// 		meterCountByType = make(map[string]int)
+// 	}
+
+// 	// Get district boundary metering points with locations
+// 	boundaryQuery := `
+// 		SELECT
+// 			jsonb_agg(
+// 				jsonb_build_object(
+// 					'boundary_metering_point', LOWER(TRIM(boundary_metering_point)),
+// 					'locations', locations_array
+// 				) ORDER BY LOWER(TRIM(boundary_metering_point))
+// 			) AS boundary_points,
+// 			COUNT(DISTINCT meter_number) AS meter_count
+// 		FROM (
+// 			SELECT
+// 				boundary_metering_point,
+// 				meter_number,
+// 				jsonb_agg(DISTINCT LOWER(TRIM(location)) ORDER BY LOWER(TRIM(location)))
+// 					FILTER (WHERE location IS NOT NULL AND location <> '') AS locations_array
+// 			FROM app.meters
+// 			WHERE meter_type = 'DISTRICT_BOUNDARY'
+// 			  AND boundary_metering_point IS NOT NULL
+// 			  AND LOWER(boundary_metering_point) LIKE '%' || ? || '%'
+// 			GROUP BY boundary_metering_point, meter_number
+// 		) AS district_boundaries
+// 	`
+
+// 	var boundaryResult struct {
+// 		BoundaryPoints json.RawMessage `bun:"boundary_points"`
+// 		MeterCount     int             `bun:"meter_count"`
+// 	}
+
+// 	err = s.db.NewRaw(boundaryQuery, districtCleanForSearch).Scan(ctx, &boundaryResult)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get boundary points: %w", err)
+// 	}
+
+// 	var boundaryPoints []models.BoundaryMeteringPointWithLocations
+// 	if len(boundaryResult.BoundaryPoints) > 0 && string(boundaryResult.BoundaryPoints) != "null" {
+// 		json.Unmarshal(boundaryResult.BoundaryPoints, &boundaryPoints)
+// 	}
+
+// 	if boundaryPoints == nil {
+// 		boundaryPoints = []models.BoundaryMeteringPointWithLocations{}
+// 	}
+
+// 	return &models.DistrictMetadata{
+// 		Region:                 region,
+// 		District:               district,
+// 		Stations:               stations,
+// 		MeterTypes:             meterTypes,
+// 		BoundaryMeteringPoints: boundaryPoints,
+// 		VoltageLevels:          voltageLevels,
+// 		TotalMeterCount:        result.TotalMeterCount + boundaryResult.MeterCount,
+// 		MeterCountByType:       meterCountByType,
+// 	}, nil
+// }
+
+
+
+
 
 // Helper function to round coordinates
 func roundCoordinate(value float64, precision int) float64 {

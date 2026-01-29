@@ -731,3 +731,44 @@ type RegionGeometryResponse struct {
 	Version string           `json:"version"`
 	Regions []RegionGeometry `json:"regions"`
 }
+
+
+
+
+// // BoundaryMeteringPointWithLocations represents a boundary metering point and its associated locations
+// type BoundaryMeteringPointWithLocations struct {
+// 	BoundaryMeteringPoint string   `json:"boundary_metering_point"`
+// 	Locations             []string `json:"locations"`
+// }
+
+// // DistrictWithBoundaries represents a district with its boundary metering points
+// type DistrictWithBoundaries struct {
+// 	DistrictName           string                                `json:"district_name"`
+// 	BoundaryMeteringPoints []BoundaryMeteringPointWithLocations  `json:"boundary_metering_points"`
+// 	MeterCount             int                                   `json:"meter_count"`
+// }
+
+// // RegionMetadata contains comprehensive metadata for a region
+// type RegionMetadata struct {
+// 	Region                         string                                `json:"region"`
+// 	ECGDistricts                   []string                              `json:"ecg_districts"`                       // Districts from ECG spatial boundaries
+// 	MeterDistricts                 []string                              `json:"meter_districts"`                     // Districts from meter assignments
+// 	Stations                       []string                              `json:"stations"`                            // For BSP, DTX, PSS, SS meters
+// 	MeterTypes                     []string                              `json:"meter_types"`
+// 	RegionalBoundaryMeteringPoints []BoundaryMeteringPointWithLocations  `json:"regional_boundary_metering_points"`   // REGIONAL_BOUNDARY with locations
+// 	Districts                      []DistrictWithBoundaries              `json:"districts"`                           // Districts with DISTRICT_BOUNDARY points
+// 	TotalMeterCount                int                                   `json:"total_meter_count"`
+// 	MeterCountByType               map[string]int                        `json:"meter_count_by_type"`
+// }
+
+// // DistrictMetadata contains comprehensive metadata for a district within a region
+// type DistrictMetadata struct {
+// 	Region                 string                                `json:"region"`
+// 	District               string                                `json:"district"`
+// 	Stations               []string                              `json:"stations"`
+// 	MeterTypes             []string                              `json:"meter_types"`
+// 	BoundaryMeteringPoints []BoundaryMeteringPointWithLocations  `json:"boundary_metering_points"`   // DISTRICT_BOUNDARY with locations
+// 	VoltageLevels          []float64                             `json:"voltage_levels"`
+// 	TotalMeterCount        int                                   `json:"total_meter_count"`
+// 	MeterCountByType       map[string]int                        `json:"meter_count_by_type"`
+// }

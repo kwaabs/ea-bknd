@@ -132,6 +132,18 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 				r.Get("/consumption", meterHandler.GetDailyConsumption)
 			})
 
+			// // Keep existing readings routes unchanged
+			// r.Route("/regions", func(r chi.Router) {
+			// 	r.Get("/metadata", meterHandler.GetAllRegionsMetadata)
+			// 	r.Get("/{region}/metadata", meterHandler.GetRegionMetadata)
+			// 	r.Get("/{region}/districts/{district}/metadata", meterHandler.GetRegionDistrictMetadata)
+			// })
+
+
+
+
+
+
 			// ✅ CONSUMPTION ENDPOINTS - ENHANCED
 			r.Route("/consumption", func(r chi.Router) {
 				// NEW - Phase 2

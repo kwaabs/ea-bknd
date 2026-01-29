@@ -2781,6 +2781,99 @@ func (h *MeterHandler) GetRegionGeometries(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+
+// // Add these handlers to your MeterHandler struct in handlers/meter_handler.go
+
+// // GetRegionMetadata returns comprehensive metadata for a specific region
+// // GET /api/v1/regions/{region}/metadata
+// func (h *MeterHandler) GetRegionMetadata(w http.ResponseWriter, r *http.Request) {
+// 	ctx := r.Context()
+
+// 	// Get region from URL parameter
+// 	region := chi.URLParam(r, "region")
+
+// 	if region == "" {
+// 		writeJSON(w, http.StatusBadRequest, map[string]string{
+// 			"error": "region parameter is required",
+// 		})
+// 		return
+// 	}
+
+// 	metadata, err := h.service.GetRegionMetadata(ctx, region)
+// 	if err != nil {
+// 		h.logr.Error("failed to get region metadata", zap.Error(err))
+// 		writeJSON(w, http.StatusInternalServerError, map[string]string{
+// 			"error": "failed to retrieve region metadata",
+// 		})
+// 		return
+// 	}
+
+// 	writeJSON(w, http.StatusOK, map[string]interface{}{
+// 		"success": true,
+// 		"data":    metadata,
+// 	})
+// }
+
+// // GetAllRegionsMetadata returns metadata for all regions
+// // GET /api/v1/regions/metadata
+// func (h *MeterHandler) GetAllRegionsMetadata(w http.ResponseWriter, r *http.Request) {
+// 	ctx := r.Context()
+
+// 	metadata, err := h.service.GetAllRegionsMetadata(ctx)
+// 	if err != nil {
+// 		h.logr.Error("failed to get all regions metadata", zap.Error(err))
+// 		writeJSON(w, http.StatusInternalServerError, map[string]string{
+// 			"error": "failed to retrieve regions metadata",
+// 		})
+// 		return
+// 	}
+
+// 	writeJSON(w, http.StatusOK, map[string]interface{}{
+// 		"success": true,
+// 		"data": map[string]interface{}{
+// 			"regions": metadata,
+// 			"total":   len(metadata),
+// 		},
+// 	})
+// }
+
+// // GetRegionDistrictMetadata returns metadata for a specific district in a region
+// // GET /api/v1/regions/{region}/districts/{district}/metadata
+// func (h *MeterHandler) GetRegionDistrictMetadata(w http.ResponseWriter, r *http.Request) {
+// 	ctx := r.Context()
+
+// 	// Get URL parameters
+// 	region := chi.URLParam(r, "region")
+// 	district := chi.URLParam(r, "district")
+
+// 	if region == "" || district == "" {
+// 		writeJSON(w, http.StatusBadRequest, map[string]string{
+// 			"error": "both region and district parameters are required",
+// 		})
+// 		return
+// 	}
+
+// 	metadata, err := h.service.GetRegionDistrictMetadata(ctx, region, district)
+// 	if err != nil {
+// 		h.logr.Error("failed to get district metadata", zap.Error(err))
+// 		writeJSON(w, http.StatusInternalServerError, map[string]string{
+// 			"error": "failed to retrieve district metadata",
+// 		})
+// 		return
+// 	}
+
+// 	writeJSON(w, http.StatusOK, map[string]interface{}{
+// 		"success": true,
+// 		"data":    metadata,
+// 	})
+// }
+
+// Example route registration in your router setup:
+// r.Get("/regions/metadata", meterHandler.GetAllRegionsMetadata)
+// r.Get("/regions/{region}/metadata", meterHandler.GetRegionMetadata)
+// r.Get("/regions/{region}/districts/{district}/metadata", meterHandler.GetRegionDistrictMetadata)
+
+
 // --- helper functions ---
 
 func splitCSV(input string) []string {

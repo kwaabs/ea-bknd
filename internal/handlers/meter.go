@@ -3,7 +3,7 @@ package handlers
 import (
 	"bknd-1/internal/models"
 	"bknd-1/internal/services"
-	"encoding/json"
+
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 	"net/http"
@@ -2906,15 +2906,3 @@ func parseBool(input string) bool {
 	return input == "1" || input == "true"
 }
 
-func writeJSON(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if data == nil {
-		return
-	}
-
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(true)
-	_ = enc.Encode(data)
-}

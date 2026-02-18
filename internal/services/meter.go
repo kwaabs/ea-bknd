@@ -26,13 +26,18 @@ type MeterQueryParams struct {
 	Page       int
 	Limit      int
 	Regions    []string
+	Districts    []string
 	MeterTypes []string
 	Locations  []string
+
+	BoundaryMeteringPoints []string // 👈 STRING slice
+
 	Search     string
 	SortBy     string
 	SortOrder  string
 	Columns    []string
 }
+
 
 func parseMeterQuery(r *http.Request) MeterQueryParams {
 	q := r.URL.Query()
@@ -73,8 +78,10 @@ func parseMeterQuery(r *http.Request) MeterQueryParams {
 		Page:       page,
 		Limit:      limit,
 		Regions:    trimSplit(getParam("region", "regions")),       // ✅ Support both
+		Districts:    trimSplit(getParam("district", "districts")),       // ✅ Support both
 		MeterTypes: trimSplit(getParam("meterType", "meterTypes")), // ✅ Support both
 		Locations:  trimSplit(getParam("location", "locations")),   // ✅ Support both
+		BoundaryMeteringPoints:  trimSplit(getParam("boundary_metering_point", "boundary_metering_points")),   // ✅ Support both
 		Search:     q.Get("search"),
 		SortBy:     q.Get("sortBy"),
 		SortOrder:  q.Get("sortOrder"),
@@ -107,11 +114,24 @@ func (s *MeterService) QueryMeters(ctx context.Context, r *http.Request) (*Meter
 		lowerRegions := stringsToLower(params.Regions)
 		q = q.Where("LOWER(region) IN (?)", bun.In(lowerRegions))
 	}
+	if len(params.Districts) > 0 {
+		lowerDistricts := stringsToLower(params.Districts)
+		q = q.Where("LOWER(district) IN (?)", bun.In(lowerDistricts))
+	}
 	if len(params.MeterTypes) > 0 {
 		q = q.Where("meter_type IN (?)", bun.In(params.MeterTypes))
 	}
 	if len(params.Locations) > 0 {
-		q = q.Where("location IN (?)", bun.In(params.Locations))
+		lowerLocations := stringsToLower(params.Locations)
+		q = q.Where("lower(location) IN (?)", bun.In(lowerLocations))
+	}
+	// Boundary metering point filter
+	if len(params.BoundaryMeteringPoints) > 0 {
+		lowerboundaryMeteringPoints := stringsToLower(params.BoundaryMeteringPoints)
+			q = q.Where(
+				"lower(boundary_metering_point) IN (?)",
+				 bun.In(lowerboundaryMeteringPoints),
+			)
 	}
 	if params.Search != "" {
 		search := "%" + params.Search + "%"
@@ -153,11 +173,17 @@ func (s *MeterService) QueryMeters(ctx context.Context, r *http.Request) (*Meter
 	if len(params.Regions) > 0 {
 		filters["regions"] = params.Regions
 	}
+	if len(params.Districts) > 0 {
+		filters["districts"] = params.Districts
+	}
 	if len(params.MeterTypes) > 0 {
 		filters["meterTypes"] = params.MeterTypes
 	}
 	if len(params.Locations) > 0 {
 		filters["locations"] = params.Locations
+	}
+	if len(params.BoundaryMeteringPoints) > 0 {
+		filters["boundaryMeteringPoints"] = params.BoundaryMeteringPoints
 	}
 	if params.Search != "" {
 		filters["search"] = params.Search
@@ -4826,7 +4852,7 @@ func (s *MeterService) GetDistrictGeometries(
 	var versionDate time.Time
 	err := s.db.NewSelect().
 		ColumnExpr("MAX(updated_at) as max_date").
-		TableExpr("app.dbo_ecg").
+		TableExpr("app.dbo_ecg_operational_regions_and_district_boundaries_10_7_25").
 		Scan(ctx, &versionDate)
 	if err != nil {
 		versionDate = time.Now() // Fallback to current date
@@ -4836,6 +4862,7 @@ func (s *MeterService) GetDistrictGeometries(
 
 	// Build query for simplified geometries
 	q := s.db.NewSelect().
+		ColumnExpr("d.district_code").
 		ColumnExpr("d.district").
 		ColumnExpr("d.region").
 		ColumnExpr("ST_Y(ST_Centroid(d.the_geom)) as center_lat").
@@ -4844,6 +4871,7 @@ func (s *MeterService) GetDistrictGeometries(
             jsonb_build_object(
                 'type', 'Feature',
                 'properties', jsonb_build_object(
+                    'district_code', d.district_code,
                     'district', d.district,
                     'region', d.region
                 ),
@@ -4852,7 +4880,7 @@ func (s *MeterService) GetDistrictGeometries(
                 )::jsonb
             ) as geojson
         `).
-		TableExpr("app.dbo_ecg d").
+		TableExpr("app.dbo_ecg_operational_regions_and_district_boundaries_10_7_25 d").
 		Where("d.district IS NOT NULL").
 		Where("d.region IS NOT NULL").
 		OrderExpr("d.region, d.district")
@@ -4865,9 +4893,32 @@ func (s *MeterService) GetDistrictGeometries(
 
 	// Apply district filter
 	if len(districts) > 0 {
-		lowerDistricts := stringsToLower(districts)
-		q = q.Where("LOWER(d.district) IN (?)", bun.In(lowerDistricts))
+
+		exact := make([]string, len(districts))
+		likes := make([]string, len(districts))
+
+		for i, d := range districts {
+			exact[i] = strings.ToLower(d)
+			likes[i] = "%" + strings.ToLower(d) + "%"
+		}
+
+		q = q.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+
+			q = q.Where("LOWER(d.district) IN (?)", bun.In(exact))
+
+			q = q.WhereGroup(" OR ", func(q *bun.SelectQuery) *bun.SelectQuery {
+				for _, l := range likes {
+					q = q.Where("LOWER(d.district) ILIKE ?", l)
+				}
+				return q
+			})
+
+			return q
+		})
 	}
+
+
+
 
 	var geometries []models.DistrictGeometry
 	if err := q.Scan(ctx, &geometries); err != nil {
@@ -4897,7 +4948,7 @@ func (s *MeterService) GetRegionGeometries(
 	var versionDate time.Time
 	err := s.db.NewSelect().
 		ColumnExpr("MAX(updated_at) as max_date").
-		TableExpr("app.dbo_ecg").
+		TableExpr("app.dbo_ecg_operational_regions_and_district_boundaries_10_7_25").
 		Scan(ctx, &versionDate)
 	if err != nil {
 		versionDate = time.Now() // Fallback to current date
@@ -4907,6 +4958,7 @@ func (s *MeterService) GetRegionGeometries(
 
 	// Build query for regional geometries using ST_Union to dissolve districts
 	q := s.db.NewSelect().
+		ColumnExpr("d.region_code").
 		ColumnExpr("d.region").
 		ColumnExpr("ST_Y(ST_Centroid(ST_Union(d.the_geom))) as center_lat").
 		ColumnExpr("ST_X(ST_Centroid(ST_Union(d.the_geom))) as center_lng").
@@ -4914,6 +4966,7 @@ func (s *MeterService) GetRegionGeometries(
             jsonb_build_object(
                 'type', 'Feature',
                 'properties', jsonb_build_object(
+                    'region_code', d.region_code,
                     'region', d.region
                 ),
                 'geometry', ST_AsGeoJSON(
@@ -4924,8 +4977,9 @@ func (s *MeterService) GetRegionGeometries(
                 )::jsonb
             ) as geojson
         `).
-		TableExpr("app.dbo_ecg d").
+		TableExpr("app.dbo_ecg_operational_regions_and_district_boundaries_10_7_25 d").
 		Where("d.region IS NOT NULL").
+		GroupExpr("d.region_code").
 		GroupExpr("d.region").
 		OrderExpr("d.region")
 
@@ -5642,7 +5696,6 @@ func simplifyGeoJSONCoordinates(geojson json.RawMessage, precision int) json.Raw
 		Type        string        `json:"type"`
 		Coordinates [][][]float64 `json:"coordinates"`
 	}
-
 	type Feature struct {
 		Type       string                 `json:"type"`
 		Properties map[string]interface{} `json:"properties"`
@@ -5654,7 +5707,7 @@ func simplifyGeoJSONCoordinates(geojson json.RawMessage, precision int) json.Raw
 		return geojson // Return original if parsing fails
 	}
 
-	// Round all coordinates
+	// ONLY round coordinates - let PostGIS handle simplification
 	for i := range feature.Geometry.Coordinates {
 		for j := range feature.Geometry.Coordinates[i] {
 			for k := range feature.Geometry.Coordinates[i][j] {
@@ -5666,24 +5719,11 @@ func simplifyGeoJSONCoordinates(geojson json.RawMessage, precision int) json.Raw
 		}
 	}
 
-	// Simplify polygon if too many points
-	if len(feature.Geometry.Coordinates) > 0 && len(feature.Geometry.Coordinates[0]) > 100 {
-		// Keep every nth point to reduce to ~50-100 points
-		n := len(feature.Geometry.Coordinates[0]) / 80
-		if n < 1 {
-			n = 1
-		}
-
-		var simplified [][]float64
-		for i := 0; i < len(feature.Geometry.Coordinates[0]); i += n {
-			simplified = append(simplified, feature.Geometry.Coordinates[0][i])
-		}
-		// Ensure polygon is closed (first == last)
-		if len(simplified) > 0 && !pointsEqual(simplified[0], simplified[len(simplified)-1]) {
-			simplified = append(simplified, simplified[0])
-		}
-		feature.Geometry.Coordinates = [][][]float64{simplified}
-	}
+	// Remove this entire block that was causing chunky zigzags:
+	// ❌ if len(feature.Geometry.Coordinates) > 0 && len(feature.Geometry.Coordinates[0]) > 100 {
+	// ❌     n := len(feature.Geometry.Coordinates[0]) / 80
+	// ❌     ... all the naive point-skipping logic ...
+	// ❌ }
 
 	simplifiedJSON, _ := json.Marshal(feature)
 	return simplifiedJSON

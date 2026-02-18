@@ -557,6 +557,7 @@ type RegionalMapResponse struct {
 
 // DistrictGeometry represents simplified district boundary with center point
 type DistrictGeometry struct {
+	DistrictCode  string          `bun:"district_code" json:"district_code"`
 	District  string          `bun:"district" json:"district"`
 	Region    string          `bun:"region" json:"region"`
 	CenterLat float64         `bun:"center_lat" json:"center_lat"`
@@ -720,6 +721,7 @@ type RegionFlowDetail struct {
 
 // RegionGeometry represents simplified regional boundary with center point
 type RegionGeometry struct {
+	RegionCode    string          `bun:"region_code" json:"region_code"`
 	Region    string          `bun:"region" json:"region"`
 	CenterLat float64         `bun:"center_lat" json:"center_lat"`
 	CenterLng float64         `bun:"center_lng" json:"center_lng"`

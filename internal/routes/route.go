@@ -44,6 +44,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 	// auth service (service handles DB checks like token_version)
 	authSvc := services.NewAuthService(db, jwtMgr, cfg, logr)
 	meterSvc := services.NewMeterService(db)
+	feederService := services.NewFeederService(db)
 	feedbackSvc := services.NewFeedbackService(db)
 	meterMetricsSvc := services.NewMeterMetricsService(db)
 	serviceAreaSvc := services.NewServiceAreaService(db) // ✅ NEW
@@ -56,6 +57,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 	feedbackHandler := handlers.NewFeedbackHandler(feedbackSvc, logr.Logger)
 	meterMetricsHandler := handlers.NewMeterMetricsHandler(meterMetricsSvc, logr.Logger)
 	serviceAreaHandler := handlers.NewServiceAreaHandler(serviceAreaSvc, logr.Logger) // ✅ NEW
+	feederHandler := handlers.NewFeederHandler(feederService, logr.Logger)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -183,6 +185,34 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 				r.Get("/counts/by-district", meterHandler.GetMeterSpatialCountsByDistrict)
 				r.Get("/counts/by-type", meterHandler.GetMeterSpatialCountsByType)
 			})
+		})
+
+		// Feeder routes
+		r.Route("/feeders", func(r chi.Router) {
+			// Get all feeders (all voltages, with optional filters)
+			// GET /api/feeders?orientation=OH&circuitId=CKT001
+			r.Get("/", feederHandler.GetAllFeeders)
+
+			// Get feeder statistics
+			// GET /api/feeders/stats?orientation=OH
+			r.Get("/stats", feederHandler.GetFeederStats)
+
+			// Get 11kV feeders only (OH + UG)
+			// GET /api/feeders/11kv?orientation=OH
+			r.Get("/11kv", feederHandler.Get11kVFeeders)
+
+			// Get 33kV feeders only (OH + UG)
+			// GET /api/feeders/33kv?orientation=UG
+			r.Get("/33kv", feederHandler.Get33kVFeeders)
+
+			// Get feeders by voltage level (alternative syntax)
+			// GET /api/feeders/voltage/11
+			// GET /api/feeders/voltage/33
+			r.Get("/voltage/{voltage}", feederHandler.GetFeedersByVoltage)
+
+			// Get specific feeder by circuit ID
+			// GET /api/feeders/CKT001
+			r.Get("/{circuitId}", feederHandler.GetFeederByCircuitID)
 		})
 
 		r.Route("/feedback", func(r chi.Router) {

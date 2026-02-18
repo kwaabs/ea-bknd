@@ -1,2908 +1,5836 @@
-package handlers
+package services
 
 import (
 	"bknd-1/internal/models"
-	"bknd-1/internal/services"
-
-	"github.com/go-chi/chi/v5"
-	"go.uber.org/zap"
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/uptrace/bun"
+	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-type MeterHandler struct {
-	service *services.MeterService
-	logr    *zap.Logger
+type MeterService struct {
+	db *bun.DB
 }
 
-func NewMeterHandler(svc *services.MeterService, logr *zap.Logger) *MeterHandler {
-	return &MeterHandler{service: svc, logr: logr}
+func NewMeterService(db *bun.DB) *MeterService {
+	return &MeterService{db: db}
 }
 
-func (h *MeterHandler) GetMeterByID(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	meter, err := h.service.GetMeterByID(r.Context(), id)
-	if err != nil {
-		h.logr.Error("failed to fetch meter", zap.Error(err))
-		http.Error(w, "meter not found", http.StatusNotFound)
-		return
-	}
-	writeJSON(w, http.StatusOK, meter)
+type MeterQueryParams struct {
+	Page       int
+	Limit      int
+	Regions    []string
+	Districts    []string
+	MeterTypes []string
+	Locations  []string
+
+	BoundaryMeteringPoints []string // 👈 STRING slice
+
+	Search     string
+	SortBy     string
+	SortOrder  string
+	Columns    []string
 }
 
-func (h *MeterHandler) QueryMeters(w http.ResponseWriter, r *http.Request) {
-	results, err := h.service.QueryMeters(r.Context(), r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": results})
-}
 
-func (h *MeterHandler) GetMeterStatus(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+func parseMeterQuery(r *http.Request) MeterQueryParams {
 	q := r.URL.Query()
-	layout := "2006-01-02"
 
-	// --- Validate dates ---
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
+	page, _ := strconv.Atoi(q.Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 50
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
-	}
-
-	// --- Split helpers ---
-	splitCSV := func(s string) []string {
-		if s == "" {
+	trimSplit := func(val string) []string {
+		if val == "" {
 			return nil
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		parts := strings.Split(val, ",")
+		out := []string{}
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
 		}
-		return parts
+		return out
 	}
 
-	// --- Build filter params ---
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")), // ✅ INCLUDED
+	// Helper to get parameter supporting both singular and plural forms
+	getParam := func(singular, plural string) string {
+		if val := q.Get(singular); val != "" {
+			return val
+		}
+		return q.Get(plural)
 	}
 
-	// --- Execute service method ---
-	results, err := h.service.GetMeterStatus(ctx, params)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
+	return MeterQueryParams{
+		Page:       page,
+		Limit:      limit,
+		Regions:    trimSplit(getParam("region", "regions")),       // ✅ Support both
+		Districts:    trimSplit(getParam("district", "districts")),       // ✅ Support both
+		MeterTypes: trimSplit(getParam("meterType", "meterTypes")), // ✅ Support both
+		Locations:  trimSplit(getParam("location", "locations")),   // ✅ Support both
+		BoundaryMeteringPoints:  trimSplit(getParam("boundary_metering_point", "boundary_metering_points")),   // ✅ Support both
+		Search:     q.Get("search"),
+		SortBy:     q.Get("sortBy"),
+		SortOrder:  q.Get("sortOrder"),
+		Columns:    trimSplit(q.Get("columns")),
 	}
-
-	writeJSON(w, http.StatusOK, results)
 }
 
-func (h *MeterHandler) GetMeterStatusCounts(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	// --- Validate dates ---
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
-	}
-
-	// --- CSV splitter ---
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	// --- Build filter params ---
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-	}
-
-	// --- Execute service ---
-	result, err := h.service.GetMeterStatusCounts(ctx, params)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
+type MeterQueryResult struct {
+	Data []models.Meter `json:"data"`
+	Meta any            `json:"meta"`
 }
 
-func (h *MeterHandler) GetAggregatedReadings(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-
-	params := models.AggregatedQueryParams{
-		DateFrom:         q.Get("date_from"),
-		DateTo:           q.Get("date_to"),
-		Regions:          splitCSV(q.Get("regions")),
-		Districts:        splitCSV(q.Get("districts")),
-		Stations:         splitCSV(q.Get("stations")),
-		Voltages:         parseCSVFloat(q.Get("voltages")),
-		Locations:        splitCSV(q.Get("locations")),
-		BoundaryPoints:   splitCSV(q.Get("boundary_metering_point")),
-		MeterTypes:       splitCSV(q.Get("meterTypes")),
-		GroupBy:          q.Get("groupBy"),
-		StackByMeterType: parseBool(q.Get("stackByMeterType")),
-	}
-
-	result, err := h.service.GetAggregated(r.Context(), &params)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
+type DailyConsumptionResult struct {
+	ConsumptionDate time.Time `bun:"consumption_date" json:"consumption_date"`
+	MeterNumber     string    `bun:"meter_number" json:"meter_number"`
+	DayStartReading float64   `bun:"day_start_reading" json:"day_start_reading"`
+	DayEndReading   float64   `bun:"day_end_reading" json:"day_end_reading"`
+	ConsumedEnergy  float64   `bun:"consumed_energy" json:"consumed_energy"`
+	SystemName      string    `bun:"system_name" json:"system_name"`
 }
 
-func (h *MeterHandler) GetDailyConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+// Updated QueryMeters with case-insensitive region filter
+func (s *MeterService) QueryMeters(ctx context.Context, r *http.Request) (*MeterQueryResult, error) {
+	params := parseMeterQuery(r)
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
+	q := s.db.NewSelect().Model((*models.Meter)(nil))
 
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
+	// Case-insensitive region filter
+	if len(params.Regions) > 0 {
+		lowerRegions := stringsToLower(params.Regions)
+		q = q.Where("LOWER(region) IN (?)", bun.In(lowerRegions))
+	}
+	if len(params.Districts) > 0 {
+		lowerDistricts := stringsToLower(params.Districts)
+		q = q.Where("LOWER(district) IN (?)", bun.In(lowerDistricts))
+	}
+	if len(params.MeterTypes) > 0 {
+		q = q.Where("meter_type IN (?)", bun.In(params.MeterTypes))
+	}
+	if len(params.Locations) > 0 {
+		lowerLocations := stringsToLower(params.Locations)
+		q = q.Where("lower(location) IN (?)", bun.In(lowerLocations))
+	}
+	// Boundary metering point filter
+	if len(params.BoundaryMeteringPoints) > 0 {
+		lowerboundaryMeteringPoints := stringsToLower(params.BoundaryMeteringPoints)
+			q = q.Where(
+				"lower(boundary_metering_point) IN (?)",
+				 bun.In(lowerboundaryMeteringPoints),
+			)
+	}
+	if params.Search != "" {
+		search := "%" + params.Search + "%"
+		q = q.Where("meter_number ILIKE ? OR station ILIKE ? OR feeder_panel_name ILIKE ?", search, search, search)
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// ✅ Split comma-separated values manually
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// Sorting
+	if params.SortBy != "" {
+		order := "ASC"
+		if strings.ToLower(params.SortOrder) == "desc" {
+			order = "DESC"
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+		q = q.Order(params.SortBy + " " + order)
 	}
 
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-	}
-
-	results, err := h.service.GetDailyConsumption(ctx, params)
+	// Count total before pagination
+	total, err := q.Count(ctx)
 	if err != nil {
-
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-
-		return
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	// Apply pagination
+	q = q.Offset((params.Page - 1) * params.Limit).Limit(params.Limit)
+
+	var meters []models.Meter
+	if err := q.Scan(ctx, &meters); err != nil {
+		return nil, err
+	}
+
+	meta := map[string]any{
+		"page":  params.Page,
+		"limit": params.Limit,
+		"total": total,
+		"pages": (total + params.Limit - 1) / params.Limit, // ceil
+	}
+
+	// Add applied filters dynamically
+	filters := map[string]any{}
+	if len(params.Regions) > 0 {
+		filters["regions"] = params.Regions
+	}
+	if len(params.Districts) > 0 {
+		filters["districts"] = params.Districts
+	}
+	if len(params.MeterTypes) > 0 {
+		filters["meterTypes"] = params.MeterTypes
+	}
+	if len(params.Locations) > 0 {
+		filters["locations"] = params.Locations
+	}
+	if len(params.BoundaryMeteringPoints) > 0 {
+		filters["boundaryMeteringPoints"] = params.BoundaryMeteringPoints
+	}
+	if params.Search != "" {
+		filters["search"] = params.Search
+	}
+	if params.SortBy != "" {
+		filters["sortBy"] = params.SortBy
+		filters["sortOrder"] = params.SortOrder
+	}
+	if len(filters) > 0 {
+		meta["filters"] = filters
+	}
+
+	return &MeterQueryResult{
+		Data: meters,
+		Meta: meta,
+	}, nil
 }
 
-func (h *MeterHandler) GetRegionalBoundaryDailyConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// ✅ Split comma-separated values manually
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-	}
-
-	results, err := h.service.GetRegionalBoundaryDailyConsumption(ctx, params)
-	if err != nil {
-
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-
-		return
-	}
-
-	writeJSON(w, http.StatusOK, results)
+// GetByID returns a single meter by ID
+func (s *MeterService) GetMeterByID(ctx context.Context, id string) (*models.Meter, error) {
+	meter := new(models.Meter)
+	err := s.db.NewSelect().Model(meter).Where("id = ?", id).Scan(ctx)
+	return meter, err
 }
 
-func (h *MeterHandler) GetDistrictBoundaryDailyConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetAggregated(ctx context.Context, params *models.AggregatedQueryParams) (*models.AggregatedResult, error) {
+	// 1️⃣ Build filters
+	filters := []string{"1=1"}
+	args := []interface{}{}
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
+	// convert all filter lists to lower-case
+	for i := range params.Regions {
+		params.Regions[i] = strings.ToLower(params.Regions[i])
+	}
+	for i := range params.Districts {
+		params.Districts[i] = strings.ToLower(params.Districts[i])
+	}
+	for i := range params.Stations {
+		params.Stations[i] = strings.ToLower(params.Stations[i])
+	}
+	for i := range params.Locations {
+		params.Locations[i] = strings.ToLower(params.Locations[i])
+	}
+	for i := range params.BoundaryPoints {
+		params.BoundaryPoints[i] = strings.ToLower(params.BoundaryPoints[i])
+	}
+	for i := range params.MeterTypes {
+		params.MeterTypes[i] = strings.ToLower(params.MeterTypes[i])
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
+	if params.DateFrom != "" {
+		filters = append(filters, "r.reading_date >= ?")
+		args = append(args, params.DateFrom)
+	}
+	if params.DateTo != "" {
+		filters = append(filters, "r.reading_date <= ?")
+		args = append(args, params.DateTo)
+	}
+	if len(params.Regions) > 0 {
+		filters = append(filters, "lower(m.region) IN (?)")
+		args = append(args, bun.In(params.Regions))
+	}
+	if len(params.Districts) > 0 {
+		filters = append(filters, "lower(m.district) IN (?)")
+		args = append(args, bun.In(params.Districts))
+	}
+	if len(params.Stations) > 0 {
+		filters = append(filters, "lower(m.station) IN (?)")
+		args = append(args, bun.In(params.Stations))
+	}
+	if len(params.Locations) > 0 {
+		filters = append(filters, "lower(m.location) IN (?)")
+		args = append(args, bun.In(params.Locations))
+	}
+	if len(params.BoundaryPoints) > 0 {
+		filters = append(filters, "lower(m.boundary_metering_point) IN (?)")
+		args = append(args, bun.In(params.BoundaryPoints))
+	}
+	if len(params.MeterTypes) > 0 {
+		filters = append(filters, "lower(m.meter_type) IN (?)")
+		args = append(args, bun.In(params.MeterTypes))
+	}
+	if params.StackByMeterType == false {
+		params.StackByMeterType = false // optional, same as zero value
 	}
 
-	// ✅ Split comma-separated values manually
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	whereClause := strings.Join(filters, " AND ")
+
+	// 2️⃣ Query aggregated totals
+	var agg models.AggregatedReading
+	err := s.db.NewRaw(`
+        WITH filtered_meters AS (SELECT * FROM app.meters m),
+        meter_readings AS (
+            SELECT r.*, d.system_name, m.meter_type
+            FROM app.meter_readings_daily r
+            JOIN filtered_meters m ON r.meter_number = m.meter_number
+            LEFT JOIN app.data_item_mapping d ON r.data_item_id = d.data_item_id
+            WHERE `+whereClause+`
+        )
+        SELECT
+            COUNT(DISTINCT meter_number) AS meter_count,
+            SUM(record_count) AS reading_count,
+            SUM(CASE WHEN system_name='import_kwh' THEN total_val ELSE 0 END) AS total_import_kwh,
+            SUM(CASE WHEN system_name='export_kwh' THEN total_val ELSE 0 END) AS total_export_kwh,
+            SUM(CASE WHEN system_name='import_kvah' THEN total_val ELSE 0 END) AS total_import_kvah,
+            SUM(CASE WHEN system_name='export_kvah' THEN total_val ELSE 0 END) AS total_export_kvah,
+            SUM(CASE WHEN system_name='import_kvar' THEN total_val ELSE 0 END) AS total_import_kvar,
+            SUM(CASE WHEN system_name='export_kvar' THEN total_val ELSE 0 END) AS total_export_kvar
+        FROM meter_readings
+    `, args...).Scan(ctx, &agg)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3️⃣ Query time series grouped by day
+	type row struct {
+		Date       time.Time `bun:"reading_date"`
+		MeterType  string    `bun:"meter_type"`
+		SystemName string    `bun:"system_name"`
+		TotalVal   float64   `bun:"total_val"`
+	}
+
+	var rows []row
+	err = s.db.NewRaw(`
+        SELECT r.reading_date, m.meter_type, d.system_name, SUM(r.total_val) AS total_val
+        FROM app.meter_readings_daily r
+        JOIN app.meters m ON r.meter_number = m.meter_number
+        LEFT JOIN app.data_item_mapping d ON r.data_item_id = d.data_item_id
+        WHERE `+whereClause+`
+        GROUP BY r.reading_date, m.meter_type, d.system_name
+        ORDER BY r.reading_date
+    `, args...).Scan(ctx, &rows)
+	if err != nil {
+		return nil, err
+	}
+
+	// 4️⃣ Build time series response
+	timeSeriesMap := map[string]*models.TimeSeriesReading{}
+	for _, r := range rows {
+		key := r.Date.Format("2006-01-02")
+		ts, ok := timeSeriesMap[key]
+		if !ok {
+			ts = &models.TimeSeriesReading{
+				Date:  r.Date,
+				Extra: make(map[string]float64),
+			}
+			timeSeriesMap[key] = ts
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+
+		if params.StackByMeterType && r.MeterType != "" && r.SystemName != "" {
+			ts.Extra[r.MeterType+"_"+r.SystemName] = r.TotalVal
+		} else {
+			switch r.SystemName {
+			case "import_kwh":
+				ts.TotalImportKWh += r.TotalVal
+			case "export_kwh":
+				ts.TotalExportKWh += r.TotalVal
+			case "import_kvah":
+				ts.TotalImportKVah += r.TotalVal
+			case "export_kvah":
+				ts.TotalExportKVah += r.TotalVal
+			case "import_kvar":
+				ts.TotalImportKVar += r.TotalVal
+			case "export_kvar":
+				ts.TotalExportKVar += r.TotalVal
+			}
 		}
-		return parts
 	}
 
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	var tsList []models.TimeSeriesReading
+	for _, v := range timeSeriesMap {
+		tsList = append(tsList, *v)
 	}
+	sort.Slice(tsList, func(i, j int) bool {
+		return tsList[i].Date.Before(tsList[j].Date)
+	})
 
-	results, err := h.service.GetDistrictBoundaryDailyConsumption(ctx, params)
+	// 5️⃣ Query byMeterType totals
+	var byType []models.ByMeterTypeReading
+	err = s.db.NewRaw(`
+        SELECT m.meter_type,
+               SUM(CASE WHEN d.system_name='import_kwh' THEN r.total_val ELSE 0 END) AS total_import_kwh,
+               SUM(CASE WHEN d.system_name='export_kwh' THEN r.total_val ELSE 0 END) AS total_export_kwh,
+               SUM(CASE WHEN d.system_name='import_kvah' THEN r.total_val ELSE 0 END) AS total_import_kvah,
+               SUM(CASE WHEN d.system_name='export_kvah' THEN r.total_val ELSE 0 END) AS total_export_kvah,
+               SUM(CASE WHEN d.system_name='import_kvar' THEN r.total_val ELSE 0 END) AS total_import_kvar,
+               SUM(CASE WHEN d.system_name='export_kvar' THEN r.total_val ELSE 0 END) AS total_export_kvar,
+               SUM(r.record_count) AS reading_count
+        FROM app.meter_readings_daily r
+        JOIN app.meters m ON r.meter_number = m.meter_number
+        LEFT JOIN app.data_item_mapping d ON r.data_item_id = d.data_item_id
+        WHERE `+whereClause+`
+        GROUP BY m.meter_type
+    `, args...).Scan(ctx, &byType)
 	if err != nil {
-
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-
-		return
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	// 6️⃣ Collect meter types
+	var meterTypes []string
+	for _, t := range byType {
+		meterTypes = append(meterTypes, t.MeterType)
+	}
+
+	return &models.AggregatedResult{
+		Aggregated:  agg,
+		TimeSeries:  tsList,
+		ByMeterType: byType,
+		MeterTypes:  meterTypes,
+	}, nil
 }
 
-func (h *MeterHandler) GetBSPDailyConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// ✅ Split comma-separated values manually
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-	}
-
-	results, err := h.service.GetBSPDailyConsumption(ctx, params)
-	if err != nil {
-
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-
-		return
-	}
-
-	writeJSON(w, http.StatusOK, results)
+type Filter struct {
+	Query string
+	Args  []interface{}
 }
 
-func (h *MeterHandler) GetFeederAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) ([]models.DailyConsumptionResults, error) {
+	var results []models.DailyConsumptionResults
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
+	filters := buildReadingFilters(params)
+
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+		Column("mcd.meter_number").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.meter_type").
+		Column("mtr.location").
+		Column("mtr.voltage_kv").
+		Column("mcd.day_start_reading").
+		Column("mcd.day_end_reading").
+		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) as consumed_energy").
+		Column("dim.system_name").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id")
+
+	for _, f := range filters {
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
+	q = q.
+		Group("mcd.consumption_date").
+		Group("mcd.meter_number").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.meter_type").
+		Group("mtr.station").
+		Group("mtr.voltage_kv").
+		Group("mtr.location").
+		Group("dim.system_name").
+		Group("mcd.day_start_reading").
+		Group("mcd.day_end_reading")
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
 	}
 
-	// Helper to split comma-separated params
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	return results, nil
+}
+
+func (s *MeterService) GetRegionalBoundaryDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) ([]models.DailyConsumptionResults, error) {
+	var results []models.DailyConsumptionResults
+
+	filters := buildReadingFilters(params)
+
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+		Column("mcd.meter_number").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.meter_type").
+		Column("mtr.voltage_kv").
+		Column("mtr.boundary_metering_point").
+		Column("mtr.location").
+		Column("mcd.day_start_reading").
+		Column("mcd.day_end_reading").
+		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
+		Column("dim.system_name").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		Where("mtr.meter_type = ?", "REGIONAL_BOUNDARY") // ✅ strict base filter
+
+	// ✅ Apply dynamic filters (except meter_type)
+	for _, f := range filters {
+		// prevent user from overriding meter_type
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	q = q.
+		Group("mcd.consumption_date").
+		Group("mcd.meter_number").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.meter_type").
+		Group("mtr.station").
+		Group("mtr.voltage_kv").
+		Group("mtr.boundary_metering_point").
+		Group("mtr.location").
+		Group("dim.system_name").
+		Group("mcd.day_start_reading").
+		Group("mcd.day_end_reading")
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func (s *MeterService) GetDistrictBoundaryDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) ([]models.DailyConsumptionResults, error) {
+	var results []models.DailyConsumptionResults
+
+	filters := buildReadingFilters(params)
+
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+		Column("mcd.meter_number").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.boundary_metering_point").
+		Column("mtr.location").
+		Column("mtr.station").
+		Column("mtr.meter_type").
+		Column("mtr.voltage_kv").
+		Column("mcd.day_start_reading").
+		Column("mcd.day_end_reading").
+		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
+		Column("dim.system_name").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		Where("mtr.meter_type = ?", "DISTRICT_BOUNDARY") // ✅ strict base filter
+
+	// ✅ Apply dynamic filters (except meter_type)
+	for _, f := range filters {
+		// prevent user from overriding meter_type
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
 		}
-		return parts
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	// Parse grouping options
-	groupBy := q.Get("groupBy") // e.g. "day", "month", "year"
-	if groupBy == "" {
-		groupBy = "day"
-	}
-	additionalGroups := splitCSV(q.Get("group")) // e.g. "region,station"
+	q = q.
+		Group("mcd.consumption_date").
+		Group("mcd.meter_number").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.meter_type").
+		Group("mtr.station").
+		Group("mtr.voltage_kv").
+		Group("mtr.boundary_metering_point").
+		Group("mtr.location").
+		Group("dim.system_name").
+		Group("mcd.day_start_reading").
+		Group("mcd.day_end_reading")
 
-	// Parse meter types - default to all types if not specified
-	meterTypes := splitCSV(q.Get("meterType"))
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func (s *MeterService) GetBSPDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) ([]models.DailyConsumptionResults, error) {
+	var results []models.DailyConsumptionResults
+
+	filters := buildReadingFilters(params)
+
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+		Column("mcd.meter_number").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.meter_type").
+		Column("mtr.feeder_panel_name").
+		ColumnExpr("mtr.ic_og AS ic_og").
+		Column("mtr.voltage_kv").
+		Column("mcd.day_start_reading").
+		Column("mcd.day_end_reading").
+		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
+		Column("dim.system_name").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		Where("mtr.meter_type = ?", "BSP") // ✅ strict base filter
+
+	// ✅ Apply dynamic filters (except meter_type)
+	for _, f := range filters {
+		// prevent user from overriding meter_type
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	q = q.
+		Group("mcd.consumption_date").
+		Group("mcd.meter_number").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.meter_type").
+		Group("mtr.station").
+		Group("mtr.feeder_panel_name").
+		Group("mtr.ic_og").
+		Group("mtr.voltage_kv").
+		Group("dim.system_name").
+		Group("mcd.day_start_reading").
+		Group("mcd.day_end_reading")
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func (s *MeterService) GetDTXDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) ([]models.DailyConsumptionResults, error) {
+	var results []models.DailyConsumptionResults
+
+	filters := buildReadingFilters(params)
+
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+		Column("mcd.meter_number").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.meter_type").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.voltage_kv").
+		Column("mcd.day_start_reading").
+		Column("mcd.day_end_reading").
+		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
+		Column("dim.system_name").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		Where("mtr.meter_type = ?", "DTX") // ✅ strict base filter
+
+	// ✅ Apply dynamic filters (except meter_type)
+	for _, f := range filters {
+		// prevent user from overriding meter_type
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	q = q.
+		Group("mcd.consumption_date").
+		Group("mcd.meter_number").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.meter_type").
+		Group("mtr.station").
+		Group("mtr.feeder_panel_name").
+		Group("mtr.voltage_kv").
+		Group("dim.system_name").
+		Group("mcd.day_start_reading").
+		Group("mcd.day_end_reading")
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func (s *MeterService) GetDTXAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+) ([]models.AggregatedConsumptionResult, error) {
+
+	var results []models.AggregatedConsumptionResult
+	filters := buildReadingFilters(params)
+
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.station AS station").
+		ColumnExpr("mtr.region AS region").
+		ColumnExpr("mtr.district AS district").
+		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+		Where("mtr.meter_type = ?", "DTX")
+
+	// --- Subquery: total count of all DTX meters ---
+	subQTotal := s.db.NewSelect().
+		TableExpr("app.meters AS mtr2").
+		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+		Where("mtr2.meter_type = ?", "DTX")
+
+	// Apply filters for total meters (global level)
+	if len(params.Regions) > 0 {
+		subQTotal = subQTotal.Where("mtr2.region IN (?)", bun.In(params.Regions))
+	}
+	if len(params.Districts) > 0 {
+		subQTotal = subQTotal.Where("mtr2.district IN (?)", bun.In(params.Districts))
+	}
+	if len(params.Stations) > 0 {
+		subQTotal = subQTotal.Where("mtr2.station IN (?)", bun.In(params.Stations))
+	}
+	if len(params.Locations) > 0 {
+		subQTotal = subQTotal.Where("mtr2.location IN (?)", bun.In(params.Locations))
+	}
+
+	q = q.ColumnExpr("(?) AS total_meter_count", subQTotal)
+
+	// --- Subquery: total meters by region ---
+	subQRegion := s.db.NewSelect().
+		TableExpr("app.meters AS mtr3").
+		ColumnExpr("COUNT(DISTINCT mtr3.meter_number)").
+		Where("mtr3.meter_type = ?", "DTX").
+		Where("mtr3.region = mtr.region") // correlate by region
+
+	q = q.ColumnExpr("(?) AS total_meters_by_region", subQRegion)
+
+	// --- Subquery: total meters by district ---
+	subQDistrict := s.db.NewSelect().
+		TableExpr("app.meters AS mtr4").
+		ColumnExpr("COUNT(DISTINCT mtr4.meter_number)").
+		Where("mtr4.meter_type = ?", "DTX").
+		Where("mtr4.district = mtr.district") // correlate by district
+
+	q = q.ColumnExpr("(?) AS total_meters_by_district", subQDistrict)
+
+	// --- Time grouping ---
+	groupCols := []bun.Safe{
+		bun.Safe("dim.system_name"),
+		bun.Safe("mtr.station"),
+		bun.Safe("mtr.region"),
+		bun.Safe("mtr.district"),
+		bun.Safe("mtr.feeder_panel_name"),
+	}
+
+	switch groupBy {
+	case "day":
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	case "month":
+		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+	case "year":
+		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+	default:
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	}
+
+	// --- Additional grouping ---
+	for _, g := range additionalGroups {
+		col := fmt.Sprintf("mtr.%s", g)
+		if g != "meter_type" {
+			col = fmt.Sprintf("LOWER(mtr.%s)", g)
+		}
+		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+		groupCols = append(groupCols, bun.Safe(col))
+	}
+
+	// --- Apply filters (except meter_type override) ---
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// --- Group by all relevant columns ---
+	for _, g := range groupCols {
+		q = q.GroupExpr(string(g))
+	}
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func (s *MeterService) GetAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+) ([]models.AggregatedConsumptionResult, error) {
+
+	var results []models.AggregatedConsumptionResult
+	filters := buildReadingFilters(params)
+
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.station AS station").
+		ColumnExpr("mtr.meter_type AS meter_type").
+		ColumnExpr("mtr.region AS region").
+		ColumnExpr("mtr.boundary_metering_point AS boundary_metering_point").
+		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters")
+
+	// --- Dynamic subquery for total meters ---
+	subQuery := strings.Builder{}
+	subQuery.WriteString(`
+		(
+			SELECT COUNT(DISTINCT mtr2.meter_number)
+			FROM app.meters AS mtr2
+			WHERE TRUE
+	`)
+
+	// Apply same filters to subquery
+	if len(params.Regions) > 0 {
+		subQuery.WriteString(" AND mtr2.region IN (?)")
+	}
+	if len(params.Districts) > 0 {
+		subQuery.WriteString(" AND mtr2.district IN (?)")
+	}
+	if len(params.Stations) > 0 {
+		subQuery.WriteString(" AND mtr2.station IN (?)")
+	}
+	if len(params.Locations) > 0 {
+		subQuery.WriteString(" AND mtr2.location IN (?)")
+	}
+	if len(params.MeterTypes) > 0 {
+		subQuery.WriteString(" AND mtr2.meter_type IN (?)")
+	}
+
+	subQuery.WriteString(") AS total_meter_count")
+
+	// Collect bind parameters
+	var subArgs []interface{}
+	if len(params.Regions) > 0 {
+		subArgs = append(subArgs, bun.In(params.Regions))
+	}
+	if len(params.Districts) > 0 {
+		subArgs = append(subArgs, bun.In(params.Districts))
+	}
+	if len(params.Stations) > 0 {
+		subArgs = append(subArgs, bun.In(params.Stations))
+	}
+	if len(params.Locations) > 0 {
+		subArgs = append(subArgs, bun.In(params.Locations))
+	}
+	if len(params.MeterTypes) > 0 {
+		subArgs = append(subArgs, bun.In(params.MeterTypes))
+	}
+
+	q = q.ColumnExpr(subQuery.String(), subArgs...)
+
+	// --- Time grouping ---
+
+	groupCols := []bun.Safe{
+		bun.Safe("dim.system_name"),
+		bun.Safe("mtr.region"),
+		bun.Safe("mtr.boundary_metering_point"),
+		bun.Safe("mtr.meter_type"),
+		bun.Safe("mtr.station"),
+		bun.Safe("mtr.feeder_panel_name"),
+	}
+	switch groupBy {
+	case "day":
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	case "month":
+		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+	case "year":
+		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+	default:
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	}
+
+	// --- Additional grouping (region, station, etc.) ---
+	for _, g := range additionalGroups {
+		col := fmt.Sprintf("mtr.%s", g)
+		if g != "meter_type" {
+			col = fmt.Sprintf("LOWER(mtr.%s)", g)
+		}
+		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+		groupCols = append(groupCols, bun.Safe(col))
+	}
+
+	// Apply filters to main query
+	for _, f := range filters {
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// Group by all relevant columns
+	for _, g := range groupCols {
+		q = q.GroupExpr(string(g))
+	}
+
+	// Run query
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func (s *MeterService) GetBSPAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+) ([]models.AggregatedConsumptionResult, error) {
+
+	var results []models.AggregatedConsumptionResult
+	filters := buildReadingFilters(params)
+
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.station AS station").
+		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+		ColumnExpr("mtr.ic_og AS ic_og").
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+		Where("mtr.meter_type = ?", "BSP")
+
+	// --- Subquery 1: total_meter_count (filtered) ---
+	subQFiltered := s.db.NewSelect().
+		TableExpr("app.meters AS mtr2").
+		Join("JOIN app.meter_consumption_daily AS mcd2 ON mcd2.meter_number = mtr2.meter_number").
+		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+		Where("mtr2.meter_type = ?", "BSP")
+
+	for _, f := range filters {
+		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
+		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
+		if strings.Contains(strings.ToLower(qry), "meter_type") {
+			continue
+		}
+		subQFiltered = subQFiltered.Where(qry, f.Args...)
+	}
+
+	q = q.ColumnExpr("(?) AS total_meter_count", subQFiltered)
+
+	// --- Subquery 2: all_meters_count (unfiltered BSP) ---
+	subQAll := s.db.NewSelect().
+		TableExpr("app.meters AS mtr3").
+		ColumnExpr("COUNT(DISTINCT mtr3.meter_number)").
+		Where("mtr3.meter_type = ?", "BSP")
+
+	q = q.ColumnExpr("(?) AS all_meters_count", subQAll)
+
+	// --- Time grouping ---
+	groupCols := []bun.Safe{
+		bun.Safe("dim.system_name"),
+		bun.Safe("mtr.station"),
+		bun.Safe("mtr.feeder_panel_name"),
+		bun.Safe("mtr.ic_og"),
+	}
+
+	switch groupBy {
+	case "day":
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	case "month":
+		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+	case "year":
+		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+	default:
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	}
+
+	// --- Additional grouping ---
+	for _, g := range additionalGroups {
+		col := fmt.Sprintf("mtr.%s", g)
+		if g != "meter_type" {
+			col = fmt.Sprintf("LOWER(mtr.%s)", g)
+		}
+		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+		groupCols = append(groupCols, bun.Safe(col))
+	}
+
+	// --- Apply filters (skip meter_type override) ---
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// --- Group by all relevant columns ---
+	for _, g := range groupCols {
+		q = q.GroupExpr(string(g))
+	}
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+//func (s *MeterService) GetFeederAggregatedConsumption(
+//	ctx context.Context,
+//	params models.ReadingFilterParams,
+//	groupBy string,
+//	additionalGroups []string,
+//	meterTypes []string, // New parameter to specify meter types
+//) ([]models.AggregatedConsumptionResult, error) {
+//
+//	var results []models.AggregatedConsumptionResult
+//	filters := buildReadingFilters(params)
+//
+//	// Validate and set default meter types if none provided
+//	if len(meterTypes) == 0 {
+//		meterTypes = []string{"BSP", "PSS", "SS"} // Default to all types
+//	}
+//
+//	q := s.db.NewSelect().
+//		TableExpr("app.meter_consumption_daily AS mcd").
+//		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+//		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+//		ColumnExpr("dim.system_name AS system_name").
+//		ColumnExpr("mtr.station AS station").
+//		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+//		ColumnExpr("mtr.ic_og AS ic_og").
+//		ColumnExpr("mtr.meter_type AS meter_type"). // Include meter_type in results
+//		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+//		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+//		Where("mtr.meter_type IN (?)", bun.In(meterTypes)) // Use IN clause for multiple types
+//
+//	// --- Subquery 1: total_meter_count (filtered) ---
+//	subQFiltered := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr2").
+//		Join("JOIN app.meter_consumption_daily AS mcd2 ON mcd2.meter_number = mtr2.meter_number").
+//		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+//		Where("mtr2.meter_type IN (?)", bun.In(meterTypes))
+//
+//	for _, f := range filters {
+//		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
+//		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
+//		if strings.Contains(strings.ToLower(qry), "meter_type") {
+//			continue
+//		}
+//		subQFiltered = subQFiltered.Where(qry, f.Args...)
+//	}
+//
+//	q = q.ColumnExpr("(?) AS total_meter_count", subQFiltered)
+//
+//	// --- Subquery 2: all_meters_count (unfiltered by specified types) ---
+//	subQAll := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr3").
+//		ColumnExpr("COUNT(DISTINCT mtr3.meter_number)").
+//		Where("mtr3.meter_type IN (?)", bun.In(meterTypes))
+//
+//	q = q.ColumnExpr("(?) AS all_meters_count", subQAll)
+//
+//	// --- Time grouping ---
+//	groupCols := []bun.Safe{
+//		bun.Safe("dim.system_name"),
+//		bun.Safe("mtr.station"),
+//		bun.Safe("mtr.feeder_panel_name"),
+//		bun.Safe("mtr.ic_og"),
+//		bun.Safe("mtr.meter_type"), // Include meter_type in grouping
+//	}
+//
+//	switch groupBy {
+//	case "day":
+//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+//	case "month":
+//		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+//	case "year":
+//		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+//		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+//	default:
+//		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+//		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+//	}
+//
+//	// --- Additional grouping ---
+//	for _, g := range additionalGroups {
+//		col := fmt.Sprintf("mtr.%s", g)
+//		if g != "meter_type" {
+//			col = fmt.Sprintf("LOWER(mtr.%s)", g)
+//		}
+//		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+//		groupCols = append(groupCols, bun.Safe(col))
+//	}
+//
+//	// --- Apply filters (skip meter_type override) ---
+//	for _, f := range filters {
+//		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+//			continue
+//		}
+//		q = q.Where(f.Query, f.Args...)
+//	}
+//
+//	// --- Group by all relevant columns ---
+//	for _, g := range groupCols {
+//		q = q.GroupExpr(string(g))
+//	}
+//
+//	// Optional: Order by meter_type for consistent results
+//	q = q.OrderExpr("mtr.meter_type", "group_period")
+//
+//	if err := q.Scan(ctx, &results); err != nil {
+//		return nil, err
+//	}
+//
+//	return results, nil
+//}
+
+func (s *MeterService) GetFeederAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+	meterTypes []string,
+) ([]models.AggregatedConsumptionResult, error) {
+
+	var results []models.AggregatedConsumptionResult
+	filters := buildReadingFilters(params)
+
+	// Validate and set default meter types if none provided
+	if len(meterTypes) == 0 {
+		meterTypes = []string{"BSP", "PSS", "SS"}
+	}
+
+	// --- Calculate counts ONCE ---
+	var totalMeterCount, allMetersCount int64
+
+	// total_meter_count: meters with consumption in date range
+	subQFiltered := s.db.NewSelect().
+		TableExpr("app.meters AS mtr2").
+		Join("JOIN app.meter_consumption_daily AS mcd2 ON mcd2.meter_number = mtr2.meter_number").
+		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+		Where("mtr2.meter_type IN (?)", bun.In(meterTypes))
+
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
+		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
+		subQFiltered = subQFiltered.Where(qry, f.Args...)
+	}
+
+	if err := subQFiltered.Scan(ctx, &totalMeterCount); err != nil {
+		return nil, err
+	}
+
+	// all_meters_count: all meters of specified types (no date filter, no join needed)
+	if err := s.db.NewSelect().
+		TableExpr("app.meters").
+		ColumnExpr("COUNT(DISTINCT meter_number)").
+		Where("meter_type IN (?)", bun.In(meterTypes)).
+		Scan(ctx, &allMetersCount); err != nil {
+		return nil, err
+	}
+
+	// --- Main query ---
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+		ColumnExpr("mtr.ic_og AS ic_og").
+		ColumnExpr("mtr.meter_type AS meter_type").
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+		ColumnExpr("? AS total_meter_count", totalMeterCount).
+		ColumnExpr("? AS all_meters_count", allMetersCount).
+		Where("mtr.meter_type IN (?)", bun.In(meterTypes))
+
+	// --- Time grouping ---
+	groupCols := []bun.Safe{
+		bun.Safe("dim.system_name"),
+
+		bun.Safe("mtr.feeder_panel_name"),
+		bun.Safe("mtr.ic_og"),
+		bun.Safe("mtr.meter_type"),
+	}
+
+	switch groupBy {
+	case "day":
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	case "month":
+		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+	case "year":
+		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+	default:
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	}
+
+	// --- Additional grouping (skip meter_type if already included) ---
+	for _, g := range additionalGroups {
+		if g == "meter_type" {
+			continue // Already in groupCols
+		}
+		col := fmt.Sprintf("LOWER(mtr.%s)", g)
+		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+		groupCols = append(groupCols, bun.Safe(col))
+	}
+
+	// --- Apply filters ---
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// --- Group by ---
+	for _, g := range groupCols {
+		q = q.GroupExpr(string(g))
+	}
+
+	q = q.OrderExpr("mtr.meter_type, group_period")
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+func (s *MeterService) GetFeederDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	meterTypes []string, // New parameter to specify meter types
+) ([]models.DailyConsumptionResults, error) {
+	var results []models.DailyConsumptionResults
+
+	filters := buildReadingFilters(params)
+
+	// Validate and set default meter types if none provided
 	if len(meterTypes) == 0 {
 		meterTypes = []string{"BSP", "PSS", "SS"} // Default to all types
 	}
 
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            meterTypes,
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+		Column("mcd.meter_number").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.meter_type").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.ic_og").
+		Column("mtr.voltage_kv").
+		Column("mcd.day_start_reading").
+		Column("mcd.day_end_reading").
+		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
+		Column("dim.system_name").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		Where("mtr.meter_type IN (?)", bun.In(meterTypes)) // ✅ Use IN clause for multiple types
+
+	// ✅ Apply dynamic filters (except meter_type)
+	for _, f := range filters {
+		// prevent user from overriding meter_type
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	results, err := h.service.GetFeederAggregatedConsumption(ctx, params, groupBy, additionalGroups, meterTypes)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
+	q = q.
+		Group("mcd.consumption_date").
+		Group("mcd.meter_number").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.meter_type"). // Keep meter_type in grouping
+		Group("mtr.station").
+		Group("mtr.feeder_panel_name").
+		Group("mtr.ic_og").
+		Group("mtr.voltage_kv").
+		Group("dim.system_name").
+		Group("mcd.day_start_reading").
+		Group("mcd.day_end_reading").
+		Order("mtr.meter_type", "mcd.consumption_date") // Optional: Add ordering for consistency
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	return results, nil
 }
 
-func (h *MeterHandler) GetFeederDailyConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetPSSDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) ([]models.DailyConsumptionResults, error) {
+	var results []models.DailyConsumptionResults
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
-	}
+	filters := buildReadingFilters(params)
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
-	}
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+		Column("mcd.meter_number").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.meter_type").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.ic_og").
+		Column("mtr.voltage_kv").
+		Column("mcd.day_start_reading").
+		Column("mcd.day_end_reading").
+		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
+		Column("dim.system_name").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		Where("mtr.meter_type = ?", "PSS") // ✅ strict base filter
 
-	// Helper to split comma-separated params
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// ✅ Apply dynamic filters (except meter_type)
+	for _, f := range filters {
+		// prevent user from overriding meter_type
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	// Parse meter types - default to all types if not specified
-	meterTypes := splitCSV(q.Get("meterType"))
-	if len(meterTypes) == 0 {
-		meterTypes = []string{"BSP", "PSS", "SS"} // Default to all types
+	q = q.
+		Group("mcd.consumption_date").
+		Group("mcd.meter_number").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.meter_type").
+		Group("mtr.station").
+		Group("mtr.feeder_panel_name").
+		Group("mtr.ic_og").
+		Group("mtr.voltage_kv").
+		Group("dim.system_name").
+		Group("mcd.day_start_reading").
+		Group("mcd.day_end_reading")
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
 	}
 
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            meterTypes,
-	}
-
-	results, err := h.service.GetFeederDailyConsumption(ctx, params, meterTypes)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, results)
+	return results, nil
 }
 
-func (h *MeterHandler) GetBSPAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetPSSAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+) ([]models.AggregatedConsumptionResult, error) {
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
-	}
+	var results []models.AggregatedConsumptionResult
+	filters := buildReadingFilters(params)
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
-	}
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.station AS station").
+		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+		ColumnExpr("mtr.ic_og AS ic_og").
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+		Where("mtr.meter_type = ?", "PSS")
 
-	// Helper to split comma-separated params
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// --- Subquery 1: total_meter_count (filtered) ---
+	subQFiltered := s.db.NewSelect().
+		TableExpr("app.meters AS mtr2").
+		Join("JOIN app.meter_consumption_daily AS mcd2 ON mcd2.meter_number = mtr2.meter_number").
+		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+		Where("mtr2.meter_type = ?", "PSS")
+
+	for _, f := range filters {
+		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
+		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
+		if strings.Contains(strings.ToLower(qry), "meter_type") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		subQFiltered = subQFiltered.Where(qry, f.Args...)
+	}
+
+	q = q.ColumnExpr("(?) AS total_meter_count", subQFiltered)
+
+	// --- Subquery 2: all_meters_count (unfiltered PSS) ---
+	subQAll := s.db.NewSelect().
+		TableExpr("app.meters AS mtr3").
+		ColumnExpr("COUNT(DISTINCT mtr3.meter_number)").
+		Where("mtr3.meter_type = ?", "PSS")
+
+	q = q.ColumnExpr("(?) AS all_meters_count", subQAll)
+
+	// --- Time grouping ---
+	groupCols := []bun.Safe{
+		bun.Safe("dim.system_name"),
+		bun.Safe("mtr.station"),
+		bun.Safe("mtr.feeder_panel_name"),
+		bun.Safe("mtr.ic_og"),
+	}
+
+	switch groupBy {
+	case "day":
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	case "month":
+		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+	case "year":
+		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+	default:
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	}
+
+	// --- Additional grouping ---
+	for _, g := range additionalGroups {
+		col := fmt.Sprintf("mtr.%s", g)
+		if g != "meter_type" {
+			col = fmt.Sprintf("LOWER(mtr.%s)", g)
 		}
-		return parts
+		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+		groupCols = append(groupCols, bun.Safe(col))
 	}
 
-	// Parse grouping options
-	groupBy := q.Get("groupBy") // e.g. "day", "month", "year"
-	if groupBy == "" {
-		groupBy = "day"
-	}
-	additionalGroups := splitCSV(q.Get("group")) // e.g. "region,station"
-
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	// --- Apply filters (skip meter_type override) ---
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	results, err := h.service.GetBSPAggregatedConsumption(ctx, params, groupBy, additionalGroups)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
+	// --- Group by all relevant columns ---
+	for _, g := range groupCols {
+		q = q.GroupExpr(string(g))
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
 }
 
-func (h *MeterHandler) GetPSSDailyConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetSSDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) ([]models.DailyConsumptionResults, error) {
+	var results []models.DailyConsumptionResults
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
+	filters := buildReadingFilters(params)
 
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+		Column("mcd.meter_number").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.meter_type").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.voltage_kv").
+		Column("mcd.day_start_reading").
+		Column("mcd.day_end_reading").
+		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
+		Column("dim.system_name").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		Where("mtr.meter_type = ?", "SS") // ✅ strict base filter
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// ✅ Split comma-separated values manually
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// ✅ Apply dynamic filters (except meter_type)
+	for _, f := range filters {
+		// prevent user from overriding meter_type
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	q = q.
+		Group("mcd.consumption_date").
+		Group("mcd.meter_number").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.meter_type").
+		Group("mtr.station").
+		Group("mtr.feeder_panel_name").
+		Group("mtr.voltage_kv").
+		Group("dim.system_name").
+		Group("mcd.day_start_reading").
+		Group("mcd.day_end_reading")
+
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
 	}
 
-	results, err := h.service.GetPSSDailyConsumption(ctx, params)
-	if err != nil {
-
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-
-		return
-	}
-
-	writeJSON(w, http.StatusOK, results)
+	return results, nil
 }
 
-func (h *MeterHandler) GetPSSAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetSSAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+) ([]models.AggregatedConsumptionResult, error) {
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
-	}
+	var results []models.AggregatedConsumptionResult
+	filters := buildReadingFilters(params)
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
-	}
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.station AS station").
+		ColumnExpr("mtr.feeder_panel_name AS feeder_panel_name").
+		ColumnExpr("mtr.ic_og AS ic_og").
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+		Where("mtr.meter_type = ?", "SS")
 
-	// Helper to split comma-separated params
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// --- Subquery 1: total_meter_count (filtered) ---
+	subQFiltered := s.db.NewSelect().
+		TableExpr("app.meters AS mtr2").
+		Join("JOIN app.meter_consumption_daily AS mcd2 ON mcd2.meter_number = mtr2.meter_number").
+		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+		Where("mtr2.meter_type = ?", "SS")
+
+	for _, f := range filters {
+		qry := strings.ReplaceAll(f.Query, "mtr.", "mtr2.")
+		qry = strings.ReplaceAll(qry, "mcd.", "mcd2.")
+		if strings.Contains(strings.ToLower(qry), "meter_type") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		subQFiltered = subQFiltered.Where(qry, f.Args...)
+	}
+
+	q = q.ColumnExpr("(?) AS total_meter_count", subQFiltered)
+
+	// --- Subquery 2: all_meters_count (unfiltered SS) ---
+	subQAll := s.db.NewSelect().
+		TableExpr("app.meters AS mtr3").
+		ColumnExpr("COUNT(DISTINCT mtr3.meter_number)").
+		Where("mtr3.meter_type = ?", "SS")
+
+	q = q.ColumnExpr("(?) AS all_meters_count", subQAll)
+
+	// --- Time grouping ---
+	groupCols := []bun.Safe{
+		bun.Safe("dim.system_name"),
+		bun.Safe("mtr.station"),
+		bun.Safe("mtr.feeder_panel_name"),
+		bun.Safe("mtr.ic_og"),
+	}
+
+	switch groupBy {
+	case "day":
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	case "month":
+		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+	case "year":
+		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+	default:
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	}
+
+	// --- Additional grouping ---
+	for _, g := range additionalGroups {
+		col := fmt.Sprintf("mtr.%s", g)
+		if g != "meter_type" {
+			col = fmt.Sprintf("LOWER(mtr.%s)", g)
 		}
-		return parts
+		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+		groupCols = append(groupCols, bun.Safe(col))
 	}
 
-	// Parse grouping options
-	groupBy := q.Get("groupBy") // e.g. "day", "month", "year"
-	if groupBy == "" {
-		groupBy = "day"
-	}
-	additionalGroups := splitCSV(q.Get("group")) // e.g. "region,station"
-
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	// --- Apply filters (skip meter_type override) ---
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	results, err := h.service.GetPSSAggregatedConsumption(ctx, params, groupBy, additionalGroups)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
+	// --- Group by all relevant columns ---
+	for _, g := range groupCols {
+		q = q.GroupExpr(string(g))
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
 }
 
-func (h *MeterHandler) GetSSDailyConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetRegionalBoundaryAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+) ([]models.AggregatedConsumptionResult, error) {
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
+	var results []models.AggregatedConsumptionResult
+	filters := buildReadingFilters(params)
 
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.boundary_metering_point AS boundary_metering_point").
+		ColumnExpr("mtr.location AS location").
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+		Where("mtr.meter_type = ?", "REGIONAL_BOUNDARY")
+
+	// --- Subquery for total meter count ---
+	subQ := s.db.NewSelect().
+		TableExpr("app.meters AS mtr2").
+		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+		Where("mtr2.meter_type = ?", "REGIONAL_BOUNDARY")
+
+	if len(params.Regions) > 0 {
+		subQ = subQ.Where("mtr2.region IN (?)", bun.In(params.Regions))
+	}
+	if len(params.Districts) > 0 {
+		subQ = subQ.Where("mtr2.district IN (?)", bun.In(params.Districts))
+	}
+	if len(params.Stations) > 0 {
+		subQ = subQ.Where("mtr2.station IN (?)", bun.In(params.Stations))
+	}
+	if len(params.Locations) > 0 {
+		subQ = subQ.Where("mtr2.location IN (?)", bun.In(params.Locations))
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
+	q = q.ColumnExpr("(?) AS total_meter_count", subQ)
 
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
+	// --- Time grouping ---
+	groupCols := []bun.Safe{
+		bun.Safe("dim.system_name"),
+		bun.Safe("mtr.boundary_metering_point"), // ✅ Add here!
+		bun.Safe("mtr.location"),                // ✅ Add here!
 	}
 
-	// ✅ Split comma-separated values manually
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	switch groupBy {
+	case "day":
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	case "month":
+		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+	case "year":
+		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+	default:
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	}
+
+	// --- Additional grouping ---
+	for _, g := range additionalGroups {
+		col := fmt.Sprintf("mtr.%s", g)
+		if g != "meter_type" {
+			col = fmt.Sprintf("LOWER(mtr.%s)", g)
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+		groupCols = append(groupCols, bun.Safe(col))
+	}
+
+	// --- Apply filters (skip meter_type override) ---
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
 		}
-		return parts
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	// --- Group by all relevant columns ---
+	for _, g := range groupCols {
+		q = q.GroupExpr(string(g))
 	}
 
-	results, err := h.service.GetSSDailyConsumption(ctx, params)
-	if err != nil {
-
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-
-		return
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	return results, nil
 }
 
-func (h *MeterHandler) GetSSAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetDistrictBoundaryAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+) ([]models.AggregatedConsumptionResult, error) {
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
+	var results []models.AggregatedConsumptionResult
+	filters := buildReadingFilters(params)
+
+	q := s.db.NewSelect().
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		ColumnExpr("dim.system_name AS system_name").
+		ColumnExpr("mtr.boundary_metering_point AS boundary_metering_point").
+		ColumnExpr("mtr.location AS location").
+		ColumnExpr("ROUND(SUM(mcd.consumption)::numeric, 4) AS total_consumption").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) AS active_meters").
+		Where("mtr.meter_type = ?", "DISTRICT_BOUNDARY")
+
+	// --- Subquery for total meter count ---
+	subQ := s.db.NewSelect().
+		TableExpr("app.meters AS mtr2").
+		ColumnExpr("COUNT(DISTINCT mtr2.meter_number)").
+		Where("mtr2.meter_type = ?", "DISTRICT_BOUNDARY")
+
+	if len(params.Regions) > 0 {
+		subQ = subQ.Where("mtr2.region IN (?)", bun.In(params.Regions))
+	}
+	if len(params.Districts) > 0 {
+		subQ = subQ.Where("mtr2.district IN (?)", bun.In(params.Districts))
+	}
+	if len(params.Stations) > 0 {
+		subQ = subQ.Where("mtr2.station IN (?)", bun.In(params.Stations))
+	}
+	if len(params.Locations) > 0 {
+		subQ = subQ.Where("mtr2.location IN (?)", bun.In(params.Locations))
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
+	q = q.ColumnExpr("(?) AS total_meter_count", subQ)
+
+	// --- Time grouping ---
+	groupCols := []bun.Safe{
+		bun.Safe("dim.system_name"),
+		bun.Safe("mtr.boundary_metering_point"), // ✅ Add here!
+		bun.Safe("mtr.location"),                // ✅ Add here!
 	}
 
-	// Helper to split comma-separated params
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	switch groupBy {
+	case "day":
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	case "month":
+		q = q.ColumnExpr("DATE_TRUNC('month', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('month', mcd.consumption_date)"))
+	case "year":
+		q = q.ColumnExpr("DATE_TRUNC('year', mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE_TRUNC('year', mcd.consumption_date)"))
+	default:
+		q = q.ColumnExpr("DATE(mcd.consumption_date) AS group_period")
+		groupCols = append(groupCols, bun.Safe("DATE(mcd.consumption_date)"))
+	}
+
+	// --- Additional grouping ---
+	for _, g := range additionalGroups {
+		col := fmt.Sprintf("mtr.%s", g)
+		if g != "meter_type" {
+			col = fmt.Sprintf("LOWER(mtr.%s)", g)
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		q = q.ColumnExpr(fmt.Sprintf("%s AS %s", col, g))
+		groupCols = append(groupCols, bun.Safe(col))
+	}
+
+	// --- Apply filters (skip meter_type override) ---
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+			continue
 		}
-		return parts
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	// Parse grouping options
-	groupBy := q.Get("groupBy") // e.g. "day", "month", "year"
-	if groupBy == "" {
-		groupBy = "day"
-	}
-	additionalGroups := splitCSV(q.Get("group")) // e.g. "region,station"
-
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	// --- Group by all relevant columns ---
+	for _, g := range groupCols {
+		q = q.GroupExpr(string(g))
 	}
 
-	results, err := h.service.GetSSAggregatedConsumption(ctx, params, groupBy, additionalGroups)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	return results, nil
 }
 
-func (h *MeterHandler) GetAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetMeterStatus(ctx context.Context, params models.ReadingFilterParams) ([]models.MeterStatusResult, error) {
+	var results []models.MeterStatusResult
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
-	}
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_number").
+		Column("mtr.meter_type").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.boundary_metering_point").
+		Column("mtr.station").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.location").
+		Column("mcd.consumption_date").
+		Column("mcd.consumption").
+		Column("mcd.reading_count").
+		Column("mcd.day_start_time").
+		Column("mcd.day_end_time").
+		ColumnExpr(`
+	CASE
+	WHEN mcd.meter_number IS NULL THEN 'OFFLINE - No Record'
+	WHEN mcd.data_item_id = 'NO_DATA' THEN 'OFFLINE - No Data'
+	ELSE 'ONLINE'
+	END AS status`).
+		Join(`
+	LEFT JOIN app.meter_consumption_daily AS mcd
+	ON mtr.meter_number = mcd.meter_number
+	AND mcd.consumption_date BETWEEN ? AND ?
+	`, params.DateFrom, params.DateTo)
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
-	}
+	// ----------------------------------------------------
+	// Apply universal filters (same as other functions)
+	// ----------------------------------------------------
+	filters := buildReadingFilters(params)
 
-	// Helper to split comma-separated params
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	for _, f := range filters {
+		// Skip date filter: JOIN already applied it
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	// Parse grouping options
-	groupBy := q.Get("groupBy") // e.g. "day", "month", "year"
-	if groupBy == "" {
-		groupBy = "day"
-	}
-	additionalGroups := splitCSV(q.Get("group")) // e.g. "region,station"
+	// Sorting
+	q = q.OrderExpr(`
+	CASE
+	WHEN mcd.meter_number IS NULL THEN 1
+	WHEN mcd.data_item_id = 'NO_DATA' THEN 2
+	ELSE 3
+	END ASC,
+		mtr.meter_number ASC
+	`)
 
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
 	}
 
-	results, err := h.service.GetAggregatedConsumption(ctx, params, groupBy, additionalGroups)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	return results, nil
 
-	writeJSON(w, http.StatusOK, results)
 }
 
-func (h *MeterHandler) GetDTXDailyConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+func (s *MeterService) GetMeterStatusCounts(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) (map[string]int, error) {
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
+	counts := map[string]int{
+		"total":             0,
+		"online":            0,
+		"offline_no_record": 0,
+		"offline_no_data":   0,
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
+	filters := buildReadingFilters(params)
 
-		writeJSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
+	// 🔥 Fixed query using BOOL_OR approach
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		ColumnExpr(`
+          COUNT(DISTINCT CASE WHEN mcd.meter_number IS NULL THEN mtr.id END) AS offline_no_record
+       `).
+		ColumnExpr(`
+          COUNT(DISTINCT CASE WHEN mcd.has_actual_data = false THEN mtr.id END) AS offline_no_data
+       `).
+		ColumnExpr(`
+          COUNT(DISTINCT CASE WHEN mcd.has_actual_data = true THEN mtr.id END) AS online
+       `).
+		Join(`
+          LEFT JOIN (
+             SELECT
+                meter_number,
+                MAX(consumption_date) AS last_consumption_date,
+                BOOL_OR(data_item_id != 'NO_DATA' AND data_item_id = '00100000') AS has_actual_data
+             FROM app.meter_consumption_daily
+             WHERE consumption_date BETWEEN ? AND ?
+             GROUP BY meter_number
+          ) AS mcd
+          ON mtr.meter_number = mcd.meter_number
+       `, params.DateFrom, params.DateTo)
 
-	// ✅ Split comma-separated values manually
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// Apply filters on meters table
+	for _, f := range filters {
+		// Skip date filters since they're already in the subquery
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	var row struct {
+		Online          int `bun:"online"`
+		OfflineNoRecord int `bun:"offline_no_record"`
+		OfflineNoData   int `bun:"offline_no_data"`
 	}
 
-	results, err := h.service.GetDTXDailyConsumption(ctx, params)
-	if err != nil {
-
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-
-		return
+	if err := q.Scan(ctx, &row); err != nil {
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	counts["online"] = row.Online
+	counts["offline_no_record"] = row.OfflineNoRecord
+	counts["offline_no_data"] = row.OfflineNoData
+	counts["total"] = row.Online + row.OfflineNoRecord + row.OfflineNoData
+
+	return counts, nil
 }
 
-func (h *MeterHandler) GetDTXAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+// GetMeterStatusSummary returns aggregated status counts and metrics
+func (s *MeterService) GetMeterStatusSummary(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) (*models.MeterStatusSummary, error) {
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
-	}
+	// Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
-	}
+	filters := buildReadingFilters(params)
 
-	// Helper to split comma-separated params
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// Build the query
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.has_actual_data = true THEN mtr.meter_number
+			END) as online_meters
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.has_actual_data = false THEN mtr.meter_number
+			END) as offline_no_data_meters
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.meter_number IS NULL THEN mtr.meter_number
+			END) as offline_no_record_meters
+		`).
+		ColumnExpr(`
+			COALESCE(SUM(mcd.total_consumption), 0) as total_consumption
+		`).
+		ColumnExpr(`
+			COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime
+		`).
+		Join(`
+			LEFT JOIN (
+				SELECT
+					meter_number,
+					MAX(consumption_date) as last_consumption_date,
+					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
+					SUM(consumption) as total_consumption,
+					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 /
+					 ?) as uptime_percentage
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, params.DateFrom, params.DateTo)
+
+	// Apply filters (skip date filters since they're in the subquery)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	// Parse grouping options
-	groupBy := q.Get("groupBy") // e.g. "day", "month", "year"
-	if groupBy == "" {
-		groupBy = "day"
-	}
-	additionalGroups := splitCSV(q.Get("group")) // e.g. "region,station"
-
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	// Result struct for raw query
+	var result struct {
+		TotalMeters           int     `bun:"total_meters"`
+		OnlineMeters          int     `bun:"online_meters"`
+		OfflineNoDataMeters   int     `bun:"offline_no_data_meters"`
+		OfflineNoRecordMeters int     `bun:"offline_no_record_meters"`
+		TotalConsumption      float64 `bun:"total_consumption"`
+		AvgUptime             float64 `bun:"avg_uptime"`
 	}
 
-	results, err := h.service.GetDTXAggregatedConsumption(ctx, params, groupBy, additionalGroups)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
+	if err := q.Scan(ctx, &result); err != nil {
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	// Calculate derived values
+	totalOffline := result.OfflineNoDataMeters + result.OfflineNoRecordMeters
+	onlinePercentage := 0.0
+	offlinePercentage := 0.0
+
+	if result.TotalMeters > 0 {
+		onlinePercentage = float64(result.OnlineMeters) * 100.0 / float64(result.TotalMeters)
+		offlinePercentage = float64(totalOffline) * 100.0 / float64(result.TotalMeters)
+	}
+
+	// Build filters applied map
+	filtersApplied := map[string]interface{}{
+		"dateFrom": params.DateFrom.Format("2006-01-02"),
+		"dateTo":   params.DateTo.Format("2006-01-02"),
+	}
+	if len(params.Regions) > 0 {
+		filtersApplied["region"] = params.Regions
+	}
+	if len(params.Districts) > 0 {
+		filtersApplied["district"] = params.Districts
+	}
+	if len(params.Stations) > 0 {
+		filtersApplied["station"] = params.Stations
+	}
+	if len(params.MeterTypes) > 0 {
+		filtersApplied["meterType"] = params.MeterTypes
+	}
+
+	return &models.MeterStatusSummary{
+		Total:               result.TotalMeters,
+		Online:              result.OnlineMeters,
+		OfflineNoData:       result.OfflineNoDataMeters,
+		OfflineNoRecord:     result.OfflineNoRecordMeters,
+		TotalOffline:        totalOffline,
+		OnlinePercentage:    onlinePercentage,
+		OfflinePercentage:   offlinePercentage,
+		AvgUptimePercentage: result.AvgUptime,
+		TotalConsumptionKWh: result.TotalConsumption,
+		FiltersApplied:      filtersApplied,
+	}, nil
 }
 
-func (h *MeterHandler) GetRegionalBoundaryAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+// GetMeterStatusTimeline returns daily online/offline counts for charts
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
-	}
+//func (s *MeterService) GetMeterStatusTimeline(
+//	ctx context.Context,
+//	params models.ReadingFilterParams,
+//) (*models.MeterStatusTimeline, error) {
+//
+//	filters := buildReadingFilters(params)
+//
+//	// Build subquery for meter list with filters
+//	meterSubquery := s.db.NewSelect().
+//		TableExpr("app.meters AS mtr").
+//		Column("mtr.meter_number")
+//
+//	// Apply meter filters (skip date filters)
+//	for _, f := range filters {
+//		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+//			continue
+//		}
+//		// Replace mcd. with mtr. for meter filters
+//		qry := strings.ReplaceAll(f.Query, "mcd.", "mtr.")
+//		meterSubquery = meterSubquery.Where(qry, f.Args...)
+//	}
+//
+//	// ✅ FIX: Use a subquery that determines status per meter per day first
+//	var entries []models.MeterStatusTimelineEntry
+//
+//	err := s.db.NewSelect().
+//		ColumnExpr("date").
+//		ColumnExpr("COUNT(DISTINCT CASE WHEN is_online THEN meter_number END) as online").
+//		ColumnExpr("COUNT(DISTINCT CASE WHEN NOT is_online THEN meter_number END) as offline").
+//		ColumnExpr("COUNT(DISTINCT meter_number) as total").
+//		TableExpr(`(
+//			SELECT
+//				DATE(mcd.consumption_date) as date,
+//				mcd.meter_number,
+//				BOOL_OR(mcd.data_item_id = '00100000') as is_online
+//			FROM app.meter_consumption_daily AS mcd
+//			WHERE mcd.consumption_date BETWEEN ? AND ?
+//			  AND mcd.meter_number IN (?)
+//			GROUP BY DATE(mcd.consumption_date), mcd.meter_number
+//		) AS daily_status`, params.DateFrom, params.DateTo, meterSubquery).
+//		GroupExpr("date").
+//		OrderExpr("date ASC").
+//		Scan(ctx, &entries)
+//
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	timeline := &models.MeterStatusTimeline{
+//		Data: entries,
+//	}
+//	timeline.DateRange.From = params.DateFrom.Format("2006-01-02")
+//	timeline.DateRange.To = params.DateTo.Format("2006-01-02")
+//
+//	return timeline, nil
+//}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
-	}
+// GetMeterStatusTimeline returns daily online/offline counts for charts
+func (s *MeterService) GetMeterStatusTimeline(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) (*models.MeterStatusTimeline, error) {
 
-	// Helper to split comma-separated params
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	filters := buildReadingFilters(params)
+
+	// Build subquery for meter list with filters
+	meterSubquery := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_number")
+
+	// Apply meter filters (skip date filters)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+		// Replace mcd. with mtr. for meter filters
+		qry := strings.ReplaceAll(f.Query, "mcd.", "mtr.")
+		meterSubquery = meterSubquery.Where(qry, f.Args...)
 	}
 
-	// Parse grouping options
-	groupBy := q.Get("groupBy") // e.g. "day", "month", "year"
-	if groupBy == "" {
-		groupBy = "day"
-	}
-	additionalGroups := splitCSV(q.Get("group")) // e.g. "region,station"
+	// Main query for timeline with corrected status logic
+	var entries []models.MeterStatusTimelineEntry
 
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-	}
+	err := s.db.NewSelect().
+    ColumnExpr("date").
+    ColumnExpr("COUNT(*) FILTER (WHERE is_online) AS online").
+    ColumnExpr("COUNT(*) FILTER (WHERE NOT is_online OR is_online IS NULL) AS offline").
+    ColumnExpr("COUNT(*) AS total").
+    TableExpr(`(
+        SELECT
+            d.date,
+            mtr.meter_number,
+            BOOL_OR(mcd.data_item_id != 'NO_DATA') AS is_online
+        FROM (
+            SELECT generate_series(
+                DATE(?),
+                DATE(?),
+                interval '1 day'
+            )::date AS date
+        ) d
+        CROSS JOIN (
+            SELECT mtr.meter_number
+            FROM app.meters mtr
+            WHERE mtr.meter_number IN (?)
+        ) mtr
+        LEFT JOIN app.meter_consumption_daily mcd
+          ON DATE(mcd.consumption_date) = d.date
+         AND mcd.meter_number = mtr.meter_number
+        GROUP BY d.date, mtr.meter_number
+    ) AS daily_status`,
+        params.DateFrom,
+        params.DateTo,
+        meterSubquery,
+    ).
+    Group("date").
+    Order("date ASC").
+    Scan(ctx, &entries)
 
-	results, err := h.service.GetRegionalBoundaryAggregatedConsumption(ctx, params, groupBy, additionalGroups)
+
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, results)
+	timeline := &models.MeterStatusTimeline{
+		Data: entries,
+	}
+	timeline.DateRange.From = params.DateFrom.Format("2006-01-02")
+	timeline.DateRange.To = params.DateTo.Format("2006-01-02")
+
+	return timeline, nil
 }
 
-func (h *MeterHandler) GetDistrictBoundaryAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+// GetMeterStatusDetails returns paginated meter status details
+func (s *MeterService) GetMeterStatusDetails(
+	ctx context.Context,
+	params models.StatusDetailQueryParams,
+) (*models.MeterStatusDetailResponse, error) {
 
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
-		return
+	// Validate and set defaults
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.Limit <= 0 || params.Limit > 200 {
+		params.Limit = 50
+	}
+	if params.SortOrder == "" {
+		params.SortOrder = "desc"
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
-		return
-	}
+	// Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
 
-	// Helper to split comma-separated params
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	filters := buildReadingFilters(params.ReadingFilterParams)
+
+	// Fast count query - just count meters, not consumption data
+	countQuery := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Where("1=1")
+
+	// Apply meter filters only (no consumption join needed for count)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		countQuery = countQuery.Where(f.Query, f.Args...)
+	}
+
+	if params.Search != "" {
+		countQuery = countQuery.Where("mtr.meter_number ILIKE ?", "%"+params.Search+"%")
+	}
+
+	// Fast count without aggregating consumption
+	totalCount, err := countQuery.Count(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build the aggregated meter summary query
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_number").
+		Column("mtr.meter_type").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.voltage_kv").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.location").
+		Column("mtr.ic_og").
+		Column("mtr.boundary_metering_point").
+		ColumnExpr(`
+			CASE
+				WHEN COUNT(CASE WHEN mcd.data_item_id != 'NO_DATA' THEN 1 END) > 0 THEN 'ONLINE'
+				WHEN COUNT(CASE WHEN mcd.data_item_id = 'NO_DATA' THEN 1 END) > 0 THEN 'OFFLINE - No Data'
+				ELSE 'OFFLINE - No Record'
+			END as status
+		`).
+		ColumnExpr("MAX(mcd.consumption_date) as last_consumption_date").
+		ColumnExpr("COALESCE(SUM(mcd.consumption), 0) as total_consumption_kwh").
+		ColumnExpr(`
+			(COUNT(DISTINCT CASE WHEN mcd.data_item_id != 'NO_DATA' THEN DATE(mcd.consumption_date) END) * 100.0 /
+			 ?) as uptime_percentage
+		`, daysInRange).
+		ColumnExpr(`
+			(? - COUNT(DISTINCT CASE WHEN mcd.data_item_id != 'NO_DATA' THEN DATE(mcd.consumption_date) END)) as days_offline
+		`, daysInRange).
+		ColumnExpr("MAX(mcd.day_end_time) as last_reading_time").
+		Join(`
+			LEFT JOIN app.meter_consumption_daily AS mcd
+			ON mtr.meter_number = mcd.meter_number
+			AND mcd.consumption_date BETWEEN ? AND ?
+		`, params.DateFrom, params.DateTo)
+
+	// Apply meter filters (skip date filters)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
 		}
-		return parts
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	// Parse grouping options
-	groupBy := q.Get("groupBy") // e.g. "day", "month", "year"
-	if groupBy == "" {
-		groupBy = "day"
-	}
-	additionalGroups := splitCSV(q.Get("group")) // e.g. "region,station"
-
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
+	// Apply search filter
+	if params.Search != "" {
+		q = q.Where("mtr.meter_number ILIKE ?", "%"+params.Search+"%")
 	}
 
-	results, err := h.service.GetDistrictBoundaryAggregatedConsumption(ctx, params, groupBy, additionalGroups)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	// Group by meter
+	q = q.Group("mtr.meter_number").
+		Group("mtr.meter_type").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.station").
+		Group("mtr.feeder_panel_name").
+		Group("mtr.location").
+		Group("mtr.voltage_kv").
+		Group("mtr.ic_og").
+		Group("mtr.boundary_metering_point")
 
-	writeJSON(w, http.StatusOK, results)
-}
-
-// GetMeterStatusSummary returns aggregated status counts and metrics for summary cards
-func (h *MeterHandler) GetMeterStatusSummary(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "dateTo must be after dateFrom",
-		})
-		return
-	}
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	// Build filter params
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-	}
-
-	// Call service
-	summary, err := h.service.GetMeterStatusSummary(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get meter status summary", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve status summary",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, summary)
-}
-
-// GetMeterStatusTimeline returns daily online/offline counts for timeline charts
-func (h *MeterHandler) GetMeterStatusTimeline(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "dateTo must be after dateFrom",
-		})
-		return
-	}
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	// Build filter params
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-	}
-
-	// Call service
-	timeline, err := h.service.GetMeterStatusTimeline(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get meter status timeline", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve status timeline",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, timeline)
-}
-
-// GetMeterStatusDetails returns paginated meter status details with sorting and filtering
-func (h *MeterHandler) GetMeterStatusDetails(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "dateTo must be after dateFrom",
-		})
-		return
-	}
-
-	// Parse pagination parameters
-	page := 1
-	if pageStr := q.Get("page"); pageStr != "" {
-		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
-			page = p
+	// Apply status filter after grouping (via HAVING)
+	if params.Status != "" {
+		if params.Status == "ONLINE" {
+			q = q.Having("COUNT(CASE WHEN mcd.data_item_id != 'NO_DATA' THEN 1 END) > 0")
+		} else if params.Status == "OFFLINE" {
+			q = q.Having("COUNT(CASE WHEN mcd.data_item_id != 'NO_DATA' THEN 1 END) = 0")
 		}
 	}
 
-	limit := 50
-	if limitStr := q.Get("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 200 {
-			limit = l
-		}
+	// Apply sorting
+	sortOrder := "DESC"
+	if strings.ToLower(params.SortOrder) == "asc" {
+		sortOrder = "ASC"
 	}
 
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+	switch params.SortBy {
+	case "uptime":
+		q = q.OrderExpr("uptime_percentage " + sortOrder)
+	case "consumption":
+		q = q.OrderExpr("total_consumption_kwh " + sortOrder)
+	case "meter_number":
+		q = q.OrderExpr("mtr.meter_number " + sortOrder)
+	default:
+		q = q.OrderExpr("mtr.meter_number ASC")
 	}
 
-	// Parse sorting parameters
-	sortBy := q.Get("sortBy")
-	sortOrder := strings.ToLower(q.Get("sortOrder")) // ✅ Also make sortOrder case-insensitive
-	if sortOrder == "" {
-		sortOrder = "desc"
+	// Apply pagination
+	offset := (params.Page - 1) * params.Limit
+	q = q.Limit(params.Limit).Offset(offset)
+
+	// Execute query
+	var records []models.MeterStatusDetailRecord
+	if err := q.Scan(ctx, &records); err != nil {
+		return nil, err
 	}
 
-	// Validate sortBy
-	validSortFields := map[string]bool{
-		"meter_number": true,
-		"uptime":       true,
-		"consumption":  true,
-		"":             true, // default
+	// Build response
+	totalPages := (totalCount + params.Limit - 1) / params.Limit
+	hasMore := params.Page < totalPages
+
+	// Build filters applied map
+	filtersApplied := map[string]interface{}{
+		"dateFrom": params.DateFrom.Format("2006-01-02"),
+		"dateTo":   params.DateTo.Format("2006-01-02"),
 	}
-	if !validSortFields[sortBy] {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid sortBy parameter, must be one of: meter_number, uptime, consumption",
-		})
-		return
+	if len(params.Regions) > 0 {
+		filtersApplied["region"] = params.Regions
+	}
+	if len(params.MeterTypes) > 0 {
+		filtersApplied["meterType"] = params.MeterTypes
+	}
+	if params.Search != "" {
+		filtersApplied["search"] = params.Search
+	}
+	if params.Status != "" {
+		filtersApplied["status"] = params.Status
+	}
+	if params.SortBy != "" {
+		filtersApplied["sortBy"] = params.SortBy
+		filtersApplied["sortOrder"] = params.SortOrder
 	}
 
-	// Validate sortOrder
-	if sortOrder != "asc" && sortOrder != "desc" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid sortOrder parameter, must be 'asc' or 'desc'",
-		})
-		return
+	response := &models.MeterStatusDetailResponse{
+		Data:           records,
+		FiltersApplied: filtersApplied,
 	}
+	response.Pagination.Page = params.Page
+	response.Pagination.Limit = params.Limit
+	response.Pagination.TotalRecords = totalCount
+	response.Pagination.TotalPages = totalPages
+	response.Pagination.HasMore = hasMore
 
-	// ✅ Parse status filter (case-insensitive)
-	status := strings.ToUpper(strings.TrimSpace(q.Get("status")))
-	if status != "" && status != "ONLINE" && status != "OFFLINE" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid status parameter, must be 'ONLINE' or 'OFFLINE' (case-insensitive)",
-		})
-		return
-	}
-
-	// Build filter params
-	params := models.StatusDetailQueryParams{
-		ReadingFilterParams: models.ReadingFilterParams{
-			DateFrom:              dateFrom,
-			DateTo:                dateTo,
-			MeterNumber:           splitCSV(q.Get("meterNumber")),
-			Regions:               splitCSV(q.Get("region")),
-			Districts:             splitCSV(q.Get("district")),
-			Stations:              splitCSV(q.Get("station")),
-			Locations:             splitCSV(q.Get("location")),
-			BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-			MeterTypes:            splitCSV(q.Get("meterType")),
-			Voltages:              splitCSV(q.Get("voltage_kv")),
-		},
-		Page:      page,
-		Limit:     limit,
-		Search:    q.Get("search"),
-		Status:    status, // ✅ Now uppercase
-		SortBy:    sortBy,
-		SortOrder: sortOrder,
-	}
-
-	// Call service
-	details, err := h.service.GetMeterStatusDetails(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get meter status details", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve status details",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, details)
+	return response, nil
 }
 
 // GetConsumptionByRegion returns consumption aggregated by region over time
-func (h *MeterHandler) GetConsumptionByRegion(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+// (No changes needed - this one was already correct)
+func (s *MeterService) GetConsumptionByRegion(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+) (*models.ConsumptionByRegionResponse, error) {
 
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "dateTo must be after dateFrom",
-		})
-		return
-	}
-
-	// Parse and validate groupBy parameter
-	groupBy := q.Get("groupBy")
+	// Validate groupBy parameter
 	if groupBy == "" {
 		groupBy = "day"
 	}
 
-	validGroupBy := map[string]bool{
-		"day":   true,
-		"week":  true,
-		"month": true,
-		"year":  true,
-	}
-	if !validGroupBy[groupBy] {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid groupBy parameter, must be one of: day, week, month, year",
-		})
-		return
+	filters := buildReadingFilters(params)
+
+	// Determine date grouping expression
+	var dateGroupExpr string
+	switch groupBy {
+	case "week":
+		dateGroupExpr = "DATE_TRUNC('week', mcd.consumption_date)"
+	case "month":
+		dateGroupExpr = "DATE_TRUNC('month', mcd.consumption_date)"
+	case "year":
+		dateGroupExpr = "DATE_TRUNC('year', mcd.consumption_date)"
+	default: // day
+		dateGroupExpr = "DATE(mcd.consumption_date)"
 	}
 
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// Build the main query
+	q := s.db.NewSelect().
+		ColumnExpr(dateGroupExpr + " as date").
+		Column("mtr.region").
+		ColumnExpr("COALESCE(SUM(mcd.consumption), 0) as total_consumption_kwh").
+		ColumnExpr("COUNT(DISTINCT mcd.meter_number) as meter_count").
+		ColumnExpr("COALESCE(AVG(mcd.consumption), 0) as avg_consumption_per_meter").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Where("mcd.consumption IS NOT NULL")
+
+	// Apply filters
+	for _, f := range filters {
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// Group by date and region
+	q = q.GroupExpr(dateGroupExpr).
+		Group("mtr.region").
+		OrderExpr("date ASC, mtr.region ASC")
+
+	// Execute query
+	var entries []models.ConsumptionByRegionEntry
+	if err := q.Scan(ctx, &entries); err != nil {
+		return nil, err
+	}
+
+	// Calculate summary statistics
+	var totalConsumption float64
+	regionsMap := make(map[string]bool)
+
+	for _, entry := range entries {
+		totalConsumption += entry.TotalConsumptionKWh
+		if entry.Region != "" {
+			regionsMap[entry.Region] = true
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
 	}
 
-	// Build filter params
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
+	// Build response
+	response := &models.ConsumptionByRegionResponse{
+		Data: entries,
 	}
+	response.Summary.TotalConsumptionKWh = totalConsumption
+	response.Summary.UniqueRegions = len(regionsMap)
+	response.Summary.DateRange.From = params.DateFrom.Format("2006-01-02")
+	response.Summary.DateRange.To = params.DateTo.Format("2006-01-02")
 
-	// Call service
-	consumption, err := h.service.GetConsumptionByRegion(ctx, params, groupBy)
-	if err != nil {
-		h.logr.Error("failed to get consumption by region", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve consumption data",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, consumption)
+	return response, nil
 }
 
 // GetMeterHealthMetrics returns health breakdown and metrics
-func (h *MeterHandler) GetMeterHealthMetrics(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
 
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
+func (s *MeterService) GetMeterHealthMetrics(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) (*models.MeterHealthMetrics, error) {
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
+	// ✅ Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
 
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "dateTo must be after dateFrom",
-		})
-		return
-	}
+	filters := buildReadingFilters(params)
 
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// Define health thresholds
+	const (
+		healthyThreshold = 85.0 // >= 85% uptime = healthy
+		warningThreshold = 60.0 // 60-85% uptime = warning
+		// < 60% uptime = critical
+	)
+
+	// Calculate dates for "no data" checks
+	sevenDaysAgo := params.DateTo.AddDate(0, 0, -7)
+	thirtyDaysAgo := params.DateTo.AddDate(0, 0, -30)
+
+	// Main query for overall health metrics
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage >= ? THEN mtr.meter_number
+			END) as healthy_meters
+		`, healthyThreshold).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage >= ? AND mcd.uptime_percentage < ? THEN mtr.meter_number
+			END) as warning_meters
+		`, warningThreshold, healthyThreshold).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage < ? OR mcd.uptime_percentage IS NULL THEN mtr.meter_number
+			END) as critical_meters
+		`, warningThreshold).
+		ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.last_consumption_date < ? THEN mtr.meter_number
+			END) as no_data_7days
+		`, sevenDaysAgo).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.last_consumption_date < ? THEN mtr.meter_number
+			END) as no_data_30days
+		`, thirtyDaysAgo).
+		Join(`
+			LEFT JOIN (
+				SELECT
+					meter_number,
+					MAX(consumption_date) as last_consumption_date,
+					(COUNT(DISTINCT CASE WHEN data_item_id = '00100000' THEN DATE(consumption_date) END) * 100.0 /
+					 ?) as uptime_percentage
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, params.DateFrom, params.DateTo) // ✅ FIX: Pass daysInRange
+
+	// Apply meter filters (skip date filters)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		q = q.Where(f.Query, f.Args...)
+	}
+
+	// Result struct for overall metrics
+	var overallResult struct {
+		TotalMeters    int     `bun:"total_meters"`
+		HealthyMeters  int     `bun:"healthy_meters"`
+		WarningMeters  int     `bun:"warning_meters"`
+		CriticalMeters int     `bun:"critical_meters"`
+		AvgUptime      float64 `bun:"avg_uptime"`
+		NoData7Days    int     `bun:"no_data_7days"`
+		NoData30Days   int     `bun:"no_data_30days"`
+	}
+
+	if err := q.Scan(ctx, &overallResult); err != nil {
+		return nil, err
+	}
+
+	// Query for breakdown by meter type
+	var breakdownByType []models.MeterHealthByType
+
+	qByType := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_type").
+		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage >= ? THEN mtr.meter_number
+			END) as healthy
+		`, healthyThreshold).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage >= ? AND mcd.uptime_percentage < ? THEN mtr.meter_number
+			END) as warning
+		`, warningThreshold, healthyThreshold).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.uptime_percentage < ? OR mcd.uptime_percentage IS NULL THEN mtr.meter_number
+			END) as critical
+		`, warningThreshold).
+		Join(`
+			LEFT JOIN (
+				SELECT
+					meter_number,
+					(COUNT(DISTINCT CASE WHEN data_item_id = '00100000' THEN DATE(consumption_date) END) * 100.0 /
+					 ?) as uptime_percentage
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, params.DateFrom, params.DateTo) // ✅ FIX: Pass daysInRange
+
+	// Apply same filters as overall query
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
 		}
-		return parts
+		qByType = qByType.Where(f.Query, f.Args...)
 	}
 
-	// Build filter params
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
+	qByType = qByType.Group("mtr.meter_type").
+		Order("mtr.meter_type")
+
+	if err := qByType.Scan(ctx, &breakdownByType); err != nil {
+		return nil, err
 	}
 
-	// Call service
-	health, err := h.service.GetMeterHealthMetrics(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get meter health metrics", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve health metrics",
-		})
-		return
+	// Calculate health percentage
+	healthPercentage := 0.0
+	if overallResult.TotalMeters > 0 {
+		healthPercentage = float64(overallResult.HealthyMeters) * 100.0 / float64(overallResult.TotalMeters)
 	}
 
-	writeJSON(w, http.StatusOK, health)
+	return &models.MeterHealthMetrics{
+		TotalMeters:            overallResult.TotalMeters,
+		HealthyMeters:          overallResult.HealthyMeters,
+		WarningMeters:          overallResult.WarningMeters,
+		CriticalMeters:         overallResult.CriticalMeters,
+		HealthPercentage:       healthPercentage,
+		AvgUptime:              overallResult.AvgUptime,
+		MetersWithNoData7Days:  overallResult.NoData7Days,
+		MetersWithNoData30Days: overallResult.NoData30Days,
+		BreakdownByType:        breakdownByType,
+	}, nil
 }
 
-// GetMetersWithServiceArea returns meters with spatial service area assignment
-func (h *MeterHandler) GetMetersWithServiceArea(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
+// GetMetersWithServiceArea returns meters with their spatial service area assignment
+func (s *MeterService) GetMetersWithServiceArea(
+	ctx context.Context,
+	params models.MeterSpatialJoinParams,
+) (*models.MeterWithServiceAreaResult, error) { // ✅ Changed return type
 
-	// Parse pagination
-	page, _ := strconv.Atoi(q.Get("page"))
-	if page < 1 {
-		page = 1
+	// Validate and set defaults
+	if params.Page < 1 {
+		params.Page = 1
 	}
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 {
-		limit = 50
+	if params.Limit <= 0 {
+		params.Limit = 50
+	}
+	if params.Limit > 200 {
+		params.Limit = 200
 	}
 
-	// Helper to split CSV
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// Build query with spatial join
+	q := s.db.NewSelect().
+		ColumnExpr("m.*").
+		ColumnExpr("e.district AS service_area_district").
+		ColumnExpr("e.region AS service_area_region").
+		TableExpr("app.meters AS m").
+		Join(`LEFT JOIN app.dbo_ecg AS e ON ST_Intersects(
+			e.the_geom,
+			ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
+		)`)
+
+	// Apply filters
+	if len(params.MeterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(params.MeterTypes))
+	}
+
+	if len(params.Regions) > 0 {
+		// Filter by meter's own region column
+		lowerRegions := stringsToLower(params.Regions)
+		q = q.Where("LOWER(m.region) IN (?)", bun.In(lowerRegions))
+	}
+
+	if len(params.Districts) > 0 {
+		// Filter by meter's own district column
+		lowerDistricts := stringsToLower(params.Districts)
+		q = q.Where("LOWER(m.district) IN (?)", bun.In(lowerDistricts))
+	}
+
+	if len(params.ServiceAreaRegion) > 0 {
+		// Filter by spatial service area region
+		lowerServiceRegions := stringsToLower(params.ServiceAreaRegion)
+		q = q.Where("LOWER(e.region) IN (?)", bun.In(lowerServiceRegions))
+	}
+
+	if params.HasCoordinates != nil {
+		if *params.HasCoordinates {
+			// Only meters with valid coordinates
+			q = q.Where("m.latitude IS NOT NULL AND m.longitude IS NOT NULL")
+		} else {
+			// Only meters without coordinates
+			q = q.Where("m.latitude IS NULL OR m.longitude IS NULL")
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
 	}
 
-	// Parse hasCoordinates filter
-	var hasCoordinates *bool
-	if coordStr := q.Get("hasCoordinates"); coordStr != "" {
-		val := strings.ToLower(coordStr) == "true" || coordStr == "1"
-		hasCoordinates = &val
+	if params.Search != "" {
+		search := "%" + params.Search + "%"
+		q = q.Where("m.meter_number ILIKE ? OR m.station ILIKE ? OR m.feeder_panel_name ILIKE ?",
+			search, search, search)
 	}
 
-	params := models.MeterSpatialJoinParams{
-		Page:              page,
-		Limit:             limit,
-		MeterTypes:        splitCSV(q.Get("meterType")),
-		Regions:           splitCSV(q.Get("region")),
-		Districts:         splitCSV(q.Get("district")),
-		ServiceAreaRegion: splitCSV(q.Get("serviceAreaRegion")),
-		HasCoordinates:    hasCoordinates,
-		Search:            q.Get("search"),
-		SortBy:            q.Get("sortBy"),
-		SortOrder:         q.Get("sortOrder"),
-	}
-
-	result, err := h.service.GetMetersWithServiceArea(ctx, params)
+	// Count total before pagination
+	total, err := q.Count(ctx)
 	if err != nil {
-		h.logr.Error("failed to get meters with service area", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve meters",
-		})
-		return
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	// Apply sorting
+	sortBy := params.SortBy
+	if sortBy == "" {
+		sortBy = "meter_number"
+	}
+
+	sortOrder := "ASC"
+	if strings.ToLower(params.SortOrder) == "desc" {
+		sortOrder = "DESC"
+	}
+
+	// Validate sort field to prevent SQL injection
+	validSortFields := map[string]string{
+		"meter_number":     "m.meter_number",
+		"meter_type":       "m.meter_type",
+		"region":           "m.region",
+		"district":         "m.district",
+		"station":          "m.station",
+		"service_region":   "e.region",
+		"service_district": "e.district",
+	}
+
+	if sortColumn, ok := validSortFields[sortBy]; ok {
+		q = q.OrderExpr(sortColumn + " " + sortOrder)
+	} else {
+		q = q.Order("m.meter_number ASC")
+	}
+
+	// Apply pagination
+	offset := (params.Page - 1) * params.Limit
+	q = q.Limit(params.Limit).Offset(offset)
+
+	// Execute query
+	var meters []models.MeterWithServiceArea
+	if err := q.Scan(ctx, &meters); err != nil {
+		return nil, err
+	}
+
+	// Build metadata
+	totalPages := (total + params.Limit - 1) / params.Limit
+
+	meta := map[string]any{
+		"page":  params.Page,
+		"limit": params.Limit,
+		"total": total,
+		"pages": totalPages,
+	}
+
+	// Add applied filters dynamically
+	filters := map[string]any{}
+	if len(params.MeterTypes) > 0 {
+		filters["meterTypes"] = params.MeterTypes
+	}
+	if len(params.Regions) > 0 {
+		filters["regions"] = params.Regions
+	}
+	if len(params.Districts) > 0 {
+		filters["districts"] = params.Districts
+	}
+	if len(params.ServiceAreaRegion) > 0 {
+		filters["serviceAreaRegion"] = params.ServiceAreaRegion
+	}
+	if params.HasCoordinates != nil {
+		filters["hasCoordinates"] = *params.HasCoordinates
+	}
+	if params.Search != "" {
+		filters["search"] = params.Search
+	}
+	if params.SortBy != "" {
+		filters["sortBy"] = params.SortBy
+		filters["sortOrder"] = params.SortOrder
+	}
+	if len(filters) > 0 {
+		meta["filters"] = filters
+	}
+
+	return &models.MeterWithServiceAreaResult{ // ✅ Changed struct type
+		Data: meters,
+		Meta: meta,
+	}, nil
 }
 
-// GetMeterSpatialMismatch returns meters with region/district mismatches
-func (h *MeterHandler) GetMeterSpatialMismatch(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
+// GetMeterSpatialMismatch returns meters where their assigned region/district
+// differs from their spatial service area
+func (s *MeterService) GetMeterSpatialMismatch(
+	ctx context.Context,
+	params models.MeterSpatialJoinParams,
+) (*models.MeterWithServiceAreaResult, error) { // ✅ Changed return type
 
-	page, _ := strconv.Atoi(q.Get("page"))
-	if page < 1 {
-		page = 1
+	// Similar to above but add WHERE clause for mismatches
+	if params.Page < 1 {
+		params.Page = 1
 	}
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 {
-		limit = 50
-	}
-
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+	if params.Limit <= 0 {
+		params.Limit = 50
 	}
 
-	params := models.MeterSpatialJoinParams{
-		Page:       page,
-		Limit:      limit,
-		MeterTypes: splitCSV(q.Get("meterType")),
-		Search:     q.Get("search"),
+	q := s.db.NewSelect().
+		ColumnExpr("m.*").
+		ColumnExpr("e.district AS service_area_district").
+		ColumnExpr("e.region AS service_area_region").
+		TableExpr("app.meters AS m").
+		Join(`LEFT JOIN app.dbo_ecg AS e ON ST_Intersects(
+			e.the_geom,
+			ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
+		)`).
+		Where("m.latitude IS NOT NULL AND m.longitude IS NOT NULL"). // Must have coordinates
+		Where(`(
+			LOWER(m.region) != LOWER(e.region) OR
+			LOWER(m.district) != LOWER(e.district) OR
+			e.region IS NULL OR
+			e.district IS NULL
+		)`) // Find mismatches
+
+	// Apply other filters
+	if len(params.MeterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(params.MeterTypes))
 	}
 
-	result, err := h.service.GetMeterSpatialMismatch(ctx, params)
+	if params.Search != "" {
+		search := "%" + params.Search + "%"
+		q = q.Where("m.meter_number ILIKE ?", search)
+	}
+
+	// Count total
+	total, err := q.Count(ctx)
 	if err != nil {
-		h.logr.Error("failed to get meter spatial mismatches", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve mismatches",
-		})
-		return
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	// Apply pagination
+	offset := (params.Page - 1) * params.Limit
+	q = q.Limit(params.Limit).Offset(offset)
+
+	// Execute
+	var meters []models.MeterWithServiceArea
+	if err := q.Scan(ctx, &meters); err != nil {
+		return nil, err
+	}
+
+	meta := map[string]any{
+		"page":  params.Page,
+		"limit": params.Limit,
+		"total": total,
+		"pages": (total + params.Limit - 1) / params.Limit,
+	}
+
+	return &models.MeterWithServiceAreaResult{ // ✅ Changed struct type
+		Data: meters,
+		Meta: meta,
+	}, nil
 }
 
-// GetMeterSpatialStats returns spatial assignment statistics
-func (h *MeterHandler) GetMeterSpatialStats(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	stats, err := h.service.GetMeterSpatialStats(ctx)
-	if err != nil {
-		h.logr.Error("failed to get meter spatial stats", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve statistics",
-		})
-		return
+// GetMeterSpatialStats returns statistics about spatial assignments
+func (s *MeterService) GetMeterSpatialStats(ctx context.Context) (map[string]interface{}, error) {
+	type stats struct {
+		TotalMeters              int `bun:"total_meters"`
+		MetersWithCoordinates    int `bun:"meters_with_coords"`
+		MetersWithoutCoordinates int `bun:"meters_without_coords"`
+		MetersInServiceArea      int `bun:"meters_in_service_area"`
+		MetersOutsideServiceArea int `bun:"meters_outside_service_area"`
+		MetersMismatchRegion     int `bun:"meters_mismatch_region"`
+		MetersMismatchDistrict   int `bun:"meters_mismatch_district"`
 	}
 
-	writeJSON(w, http.StatusOK, stats)
+	var result stats
+
+	err := s.db.NewRaw(`
+		WITH spatial_join AS (
+			SELECT
+				m.*,
+				e.region AS service_area_region,
+				e.district AS service_area_district
+			FROM app.meters m
+			LEFT JOIN app.dbo_ecg e ON ST_Intersects(
+				e.the_geom,
+				ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
+			)
+		)
+		SELECT
+			COUNT(*) AS total_meters,
+			COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) AS meters_with_coords,
+			COUNT(CASE WHEN latitude IS NULL OR longitude IS NULL THEN 1 END) AS meters_without_coords,
+			COUNT(CASE WHEN service_area_region IS NOT NULL THEN 1 END) AS meters_in_service_area,
+			COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL AND service_area_region IS NULL THEN 1 END) AS meters_outside_service_area,
+			COUNT(CASE WHEN LOWER(region) != LOWER(service_area_region) THEN 1 END) AS meters_mismatch_region,
+			COUNT(CASE WHEN LOWER(district) != LOWER(service_area_district) THEN 1 END) AS meters_mismatch_district
+		FROM spatial_join
+	`).Scan(ctx, &result)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"total_meters":                result.TotalMeters,
+		"meters_with_coordinates":     result.MetersWithCoordinates,
+		"meters_without_coordinates":  result.MetersWithoutCoordinates,
+		"meters_in_service_area":      result.MetersInServiceArea,
+		"meters_outside_service_area": result.MetersOutsideServiceArea,
+		"meters_mismatch_region":      result.MetersMismatchRegion,
+		"meters_mismatch_district":    result.MetersMismatchDistrict,
+		"coordinate_coverage_pct":     float64(result.MetersWithCoordinates) * 100.0 / float64(result.TotalMeters),
+		"service_area_coverage_pct":   float64(result.MetersInServiceArea) * 100.0 / float64(result.MetersWithCoordinates),
+	}, nil
 }
 
 // GetMeterSpatialCounts returns aggregated meter counts by service area
-func (h *MeterHandler) GetMeterSpatialCounts(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
+func (s *MeterService) GetMeterSpatialCounts(
+	ctx context.Context,
+	params models.MeterSpatialCountParams,
+) (*models.MeterSpatialCountResponse, error) {
 
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	params := models.MeterSpatialCountParams{
-		GroupBy:    q.Get("groupBy"), // region, district, meter_type, region_meter_type, district_meter_type
-		MeterTypes: splitCSV(q.Get("meterType")),
-		Regions:    splitCSV(q.Get("region")),
-		Districts:  splitCSV(q.Get("district")),
-	}
-
-	// Default to region if not specified
+	// Determine what to group by
 	if params.GroupBy == "" {
 		params.GroupBy = "region"
 	}
 
-	result, err := h.service.GetMeterSpatialCounts(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get meter spatial counts", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve counts",
-		})
-		return
+	// Build the base CTE with spatial join
+	var groupColumns []string
+	var selectColumns []string
+
+	switch params.GroupBy {
+	case "region":
+		groupColumns = []string{"service_area_region"} // ✅ Changed from "e.region"
+		selectColumns = []string{"service_area_region"}
+	case "district":
+		groupColumns = []string{"service_area_region", "service_area_district"} // ✅ Changed
+		selectColumns = []string{
+			"service_area_region",
+			"service_area_district",
+		}
+	case "meter_type":
+		groupColumns = []string{"meter_type"} // ✅ Changed from "m.meter_type"
+		selectColumns = []string{"meter_type"}
+	case "region_meter_type":
+		groupColumns = []string{"service_area_region", "meter_type"} // ✅ Changed
+		selectColumns = []string{
+			"service_area_region",
+			"meter_type",
+		}
+	case "district_meter_type":
+		groupColumns = []string{"service_area_region", "service_area_district", "meter_type"} // ✅ Changed
+		selectColumns = []string{
+			"service_area_region",
+			"service_area_district",
+			"meter_type",
+		}
+	default:
+		groupColumns = []string{"service_area_region"}
+		selectColumns = []string{"service_area_region"}
 	}
 
-	writeJSON(w, http.StatusOK, result)
-}
+	// Build query
+	q := s.db.NewSelect().
+		TableExpr(`(
+			SELECT
+				m.*,
+				e.region AS service_area_region,
+				e.district AS service_area_district,
+				CASE
+					WHEN LOWER(m.region) != LOWER(e.region) OR LOWER(m.district) != LOWER(e.district)
+					THEN 1 ELSE 0
+				END AS is_mismatched
+			FROM app.meters m
+			LEFT JOIN app.dbo_ecg e ON ST_Intersects(
+				e.the_geom,
+				ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326)
+			)
+		) AS spatial_join`)
 
-// GetMeterSpatialCountsByRegion returns counts grouped by region
-func (h *MeterHandler) GetMeterSpatialCountsByRegion(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+	// Add select columns
+	for _, col := range selectColumns {
+		q = q.ColumnExpr(col) // ✅ No need for alias, already correct name
 	}
 
-	result, err := h.service.GetMeterSpatialCountsByRegion(ctx, splitCSV(q.Get("meterType")))
-	if err != nil {
-		h.logr.Error("failed to get counts by region", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve counts",
-		})
-		return
+	// Add aggregation columns
+	q = q.ColumnExpr("COUNT(*) AS total_meters").
+		ColumnExpr("COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) AS meters_with_coords").
+		ColumnExpr("COUNT(CASE WHEN service_area_region IS NOT NULL THEN 1 END) AS meters_in_service_area").
+		ColumnExpr("SUM(is_mismatched) AS meters_mismatched")
+
+	// Apply filters
+	if len(params.MeterTypes) > 0 {
+		q = q.Where("meter_type IN (?)", bun.In(params.MeterTypes))
 	}
 
-	writeJSON(w, http.StatusOK, result)
-}
-
-// GetMeterSpatialCountsByDistrict returns counts grouped by district
-func (h *MeterHandler) GetMeterSpatialCountsByDistrict(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+	if len(params.Regions) > 0 {
+		lowerRegions := stringsToLower(params.Regions)
+		q = q.Where("LOWER(region) IN (?)", bun.In(lowerRegions))
 	}
 
-	result, err := h.service.GetMeterSpatialCountsByDistrict(
-		ctx,
-		q.Get("region"),
-		splitCSV(q.Get("meterType")),
+	if len(params.Districts) > 0 {
+		lowerDistricts := stringsToLower(params.Districts)
+		q = q.Where("LOWER(district) IN (?)", bun.In(lowerDistricts))
+	}
+
+	// Group by - ✅ Use column names from the subquery, not table aliases
+	for _, col := range groupColumns {
+		q = q.Group(col)
+	}
+
+	// Order by total meters descending
+	q = q.Order("total_meters DESC")
+
+	// Execute query
+	var results []models.MeterSpatialCount
+	if err := q.Scan(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	// Calculate summary statistics
+	var (
+		totalMeters     int
+		totalMismatched int
+		regionsMap      = make(map[string]bool)
+		districtsMap    = make(map[string]bool)
 	)
-	if err != nil {
-		h.logr.Error("failed to get counts by district", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve counts",
-		})
-		return
+
+	for _, r := range results {
+		totalMeters += r.TotalMeters
+		totalMismatched += r.MetersMismatched
+
+		if r.ServiceAreaRegion != nil && *r.ServiceAreaRegion != "" {
+			regionsMap[*r.ServiceAreaRegion] = true
+		}
+		if r.ServiceAreaDistrict != nil && *r.ServiceAreaDistrict != "" {
+			districtsMap[*r.ServiceAreaDistrict] = true
+		}
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	avgMetersPerRegion := 0.0
+	if len(regionsMap) > 0 {
+		avgMetersPerRegion = float64(totalMeters) / float64(len(regionsMap))
+	}
+
+	mismatchPct := 0.0
+	if totalMeters > 0 {
+		mismatchPct = float64(totalMismatched) * 100.0 / float64(totalMeters)
+	}
+
+	// Build response
+	response := &models.MeterSpatialCountResponse{
+		Data: results,
+	}
+	response.Summary.TotalMeters = totalMeters
+	response.Summary.TotalRegions = len(regionsMap)
+	response.Summary.TotalDistricts = len(districtsMap)
+	response.Summary.AvgMetersPerRegion = avgMetersPerRegion
+	response.Summary.MismatchPercentage = mismatchPct
+
+	return response, nil
 }
 
-// GetMeterSpatialCountsByType returns counts grouped by meter type
-func (h *MeterHandler) GetMeterSpatialCountsByType(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	result, err := h.service.GetMeterSpatialCountsByType(ctx)
-	if err != nil {
-		h.logr.Error("failed to get counts by type", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve counts",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
-}
-
-// GetTopBottomConsumers handles GET /api/meters/top-bottom-consumers
-func (h *MeterHandler) GetTopBottomConsumers(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "dateTo must be after dateFrom",
-		})
-		return
-	}
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	// Build filter params
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-	}
-
-	// Call service
-	result, err := h.service.GetTopBottomConsumers(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get top/bottom consumers", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve top/bottom consumers",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
-}
-
-// GetMeterHealthSummary handles GET /api/v1/meters/health/summary
-func (h *MeterHandler) GetMeterHealthSummary(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "dateTo must be after dateFrom",
-		})
-		return
-	}
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	// Build filter params
-	params := models.ReadingFilterParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(q.Get("meterNumber")),
-		Regions:               splitCSV(q.Get("region")),
-		Districts:             splitCSV(q.Get("district")),
-		Stations:              splitCSV(q.Get("station")),
-		Locations:             splitCSV(q.Get("location")),
-		BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-		MeterTypes:            splitCSV(q.Get("meterType")),
-		Voltages:              splitCSV(q.Get("voltage_kv")),
-	}
-
-	// Call service
-	summary, err := h.service.GetMeterHealthSummary(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get meter health summary", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"success": false,
-			"error":   "failed to retrieve meter health summary",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"data":    summary,
+// GetMeterSpatialCountsByRegion is a convenience wrapper
+func (s *MeterService) GetMeterSpatialCountsByRegion(
+	ctx context.Context,
+	meterTypes []string,
+) (*models.MeterSpatialCountResponse, error) {
+	return s.GetMeterSpatialCounts(ctx, models.MeterSpatialCountParams{
+		GroupBy:    "region",
+		MeterTypes: meterTypes,
 	})
 }
 
-// GetMeterHealthDetails handles GET /api/v1/meters/health/details
-func (h *MeterHandler) GetMeterHealthDetails(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+// GetMeterSpatialCountsByDistrict is a convenience wrapper
+func (s *MeterService) GetMeterSpatialCountsByDistrict(
+	ctx context.Context,
+	region string,
+	meterTypes []string,
+) (*models.MeterSpatialCountResponse, error) {
+	regions := []string{}
+	if region != "" {
+		regions = append(regions, region)
+	}
+	return s.GetMeterSpatialCounts(ctx, models.MeterSpatialCountParams{
+		GroupBy:    "district",
+		MeterTypes: meterTypes,
+		Regions:    regions,
+	})
+}
 
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
+// GetMeterSpatialCountsByType is a convenience wrapper
+func (s *MeterService) GetMeterSpatialCountsByType(
+	ctx context.Context,
+) (*models.MeterSpatialCountResponse, error) {
+	return s.GetMeterSpatialCounts(ctx, models.MeterSpatialCountParams{
+		GroupBy: "meter_type",
+	})
+}
+
+// GetTopBottomConsumers retrieves top and bottom consumers per meter type
+func (s *MeterService) GetTopBottomConsumers(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) ([]models.MeterTypeConsumers, error) {
+
+	filters := buildReadingFilters(params)
+
+	// Get aggregated consumption per meter with all filters applied
+	q := s.db.NewSelect().
+		ColumnExpr("mcd.meter_number").
+		ColumnExpr("mtr.meter_type").
+		ColumnExpr("mtr.location").
+		ColumnExpr("mtr.region").
+		ColumnExpr("mtr.district").
+		ColumnExpr("mtr.station").
+		ColumnExpr("mtr.metering_point").
+		ColumnExpr("mtr.boundary_metering_point").
+		ColumnExpr("mtr.feeder_panel_name").
+		ColumnExpr("mtr.voltage_kv").
+		ColumnExpr(`ROUND(
+			SUM(mcd.consumption)
+			FILTER (WHERE dim.name = 'Active Energy -Import [Register] [Total](Unit:kWh)')::numeric,
+			4
+		) as total_import_kwh`).
+		ColumnExpr(`ROUND(
+			SUM(mcd.consumption)
+			FILTER (WHERE dim.name = 'Active Energy -Export [Register] [Total](Unit:kWh)')::numeric,
+			4
+		) as total_export_kwh`).
+		ColumnExpr("COUNT(*) as reading_count").
+		TableExpr("app.meter_consumption_daily AS mcd").
+		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+		Where("mtr.meter_type IS NOT NULL")
+
+	// Apply all filters
+	for _, f := range filters {
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
+	// Group by meter and its attributes
+	q = q.
+		Group("mcd.meter_number").
+		Group("mtr.meter_type").
+		Group("mtr.location").
+		Group("mtr.region").
+		Group("mtr.district").
+		Group("mtr.station").
+		Group("mtr.metering_point").
+		Group("mtr.boundary_metering_point").
+		Group("mtr.feeder_panel_name").
+		Group("mtr.voltage_kv")
+
+	// Execute query to get all meter consumptions
+	var meterConsumptions []models.MeterConsumption
+	if err := q.Scan(ctx, &meterConsumptions); err != nil {
+		return nil, err
 	}
 
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "dateTo must be after dateFrom",
-		})
-		return
+	// Group by meter_type and find top/bottom for each
+	meterTypeMap := make(map[string][]models.MeterConsumption)
+	for _, mc := range meterConsumptions {
+		meterTypeMap[mc.MeterType] = append(meterTypeMap[mc.MeterType], mc)
 	}
 
-	// Parse pagination parameters
-	page := 1
-	if pageStr := q.Get("page"); pageStr != "" {
-		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
-			page = p
+	var result []models.MeterTypeConsumers
+	for meterType, meters := range meterTypeMap {
+		if len(meters) == 0 {
+			continue
 		}
-	}
 
-	limit := 50
-	if limitStr := q.Get("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 200 {
-			limit = l
+		mtc := models.MeterTypeConsumers{
+			MeterType:  meterType,
+			MeterCount: len(meters),
 		}
-	}
 
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+		// Find top and bottom import consumers
+		var topImport, bottomImport *models.MeterConsumption
+		for i := range meters {
+			m := &meters[i]
+			if topImport == nil || m.TotalImportKwh > topImport.TotalImportKwh {
+				topImport = m
+			}
+			if bottomImport == nil || m.TotalImportKwh < bottomImport.TotalImportKwh {
+				bottomImport = m
+			}
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		mtc.TopImportConsumer = topImport
+		mtc.BottomImportConsumer = bottomImport
+
+		// Find top and bottom export consumers
+		var topExport, bottomExport *models.MeterConsumption
+		for i := range meters {
+			m := &meters[i]
+			if topExport == nil || m.TotalExportKwh > topExport.TotalExportKwh {
+				topExport = m
+			}
+			if bottomExport == nil || m.TotalExportKwh < bottomExport.TotalExportKwh {
+				bottomExport = m
+			}
 		}
-		return parts
+		mtc.TopExportConsumer = topExport
+		mtc.BottomExportConsumer = bottomExport
+
+		result = append(result, mtc)
 	}
 
-	// Parse and validate health category
-	healthCategory := strings.ToLower(strings.TrimSpace(q.Get("healthCategory")))
-	validCategories := map[string]bool{
-		"excellent": true,
-		"good":      true,
-		"poor":      true,
-		"critical":  true,
-		"online":    true,
-		"offline":   true,
-		"":          true, // Allow empty for all
-	}
-	if !validCategories[healthCategory] {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid healthCategory parameter, must be one of: excellent, good, poor, critical, online, offline",
-		})
-		return
+	return result, nil
+}
+
+// GetMeterHealthSummary returns overall meter health statistics with uptime distribution
+func (s *MeterService) GetMeterHealthSummary(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) (*models.MeterHealthSummary, error) {
+
+	// Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
+
+	filters := buildReadingFilters(params)
+
+	// Main query for overall health metrics
+	q := s.db.NewSelect().
+    TableExpr("app.meters AS mtr").
+    ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total_meters").
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.has_actual_data = true THEN mtr.meter_number
+        END) as online_meters
+    `).
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.has_actual_data = false OR mcd.meter_number IS NULL THEN mtr.meter_number
+        END) as offline_meters
+    `).
+    ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.uptime_percentage > 95 THEN mtr.meter_number
+        END) as excellent
+    `).
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.uptime_percentage >= 80 AND mcd.uptime_percentage <= 95 THEN mtr.meter_number
+        END) as good
+    `).
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.uptime_percentage >= 60 AND mcd.uptime_percentage < 80 THEN mtr.meter_number
+        END) as poor
+    `).
+    ColumnExpr(`
+        COUNT(DISTINCT CASE
+            WHEN mcd.uptime_percentage < 60 THEN mtr.meter_number
+        END) as critical
+    `).
+    Join(`
+        LEFT JOIN (
+            SELECT
+                meter_number,
+                BOOL_OR(data_item_id != 'NO_DATA') AS has_actual_data,
+                (
+                    COUNT(DISTINCT CASE
+                        WHEN data_item_id != 'NO_DATA'
+                        THEN DATE(consumption_date)
+                    END) * 100.0
+                    /
+                    NULLIF(
+                        COUNT(DISTINCT DATE(consumption_date)),
+                        0
+                    )
+                ) AS uptime_percentage
+            FROM app.meter_consumption_daily
+            WHERE consumption_date BETWEEN ? AND ?
+            GROUP BY meter_number
+        ) AS mcd ON mtr.meter_number = mcd.meter_number
+    `, params.DateFrom, params.DateTo)
+
+
+	// Apply meter filters (skip date filters since they're in the subquery)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		q = q.Where(f.Query, f.Args...)
 	}
 
-	// Parse sorting parameters
-	sortBy := q.Get("sortBy")
-	sortOrder := strings.ToLower(q.Get("sortOrder"))
-	if sortOrder == "" {
-		sortOrder = "desc"
+	// Result struct for overall metrics
+	var overallResult struct {
+		TotalMeters   int     `bun:"total_meters"`
+		OnlineMeters  int     `bun:"online_meters"`
+		OfflineMeters int     `bun:"offline_meters"`
+		AvgUptime     float64 `bun:"avg_uptime"`
+		Excellent     int     `bun:"excellent"`
+		Good          int     `bun:"good"`
+		Poor          int     `bun:"poor"`
+		Critical      int     `bun:"critical"`
 	}
 
-	// Validate sortBy
-	validSortFields := map[string]bool{
-		"meter_number": true,
-		"uptime":       true,
-		"meter_type":   true,
-		"last_seen":    true,
-		"consumption":  true,
-		"":             true, // default
-	}
-	if !validSortFields[sortBy] {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid sortBy parameter, must be one of: meter_number, uptime, meter_type, last_seen, consumption",
-		})
-		return
+	if err := q.Scan(ctx, &overallResult); err != nil {
+		return nil, err
 	}
 
-	// Validate sortOrder
-	if sortOrder != "asc" && sortOrder != "desc" {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid sortOrder parameter, must be 'asc' or 'desc'",
-		})
-		return
+	// Query for breakdown by meter type
+	qByType := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_type").
+		ColumnExpr("COUNT(DISTINCT mtr.meter_number) as total").
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.has_actual_data = true THEN mtr.meter_number
+			END) as online
+		`).
+		ColumnExpr(`
+			COUNT(DISTINCT CASE
+				WHEN mcd.has_actual_data = false OR mcd.meter_number IS NULL THEN mtr.meter_number
+			END) as offline
+		`).
+		ColumnExpr("COALESCE(AVG(mcd.uptime_percentage), 0) as avg_uptime").
+		Join(`
+			LEFT JOIN (
+				SELECT
+					meter_number,
+					BOOL_OR(data_item_id != 'NO_DATA') as has_actual_data,
+					(COUNT(DISTINCT CASE WHEN data_item_id != 'NO_DATA' THEN DATE(consumption_date) END) * 100.0 /
+					 ?) as uptime_percentage
+				FROM app.meter_consumption_daily
+				WHERE consumption_date BETWEEN ? AND ?
+				GROUP BY meter_number
+			) AS mcd ON mtr.meter_number = mcd.meter_number
+		`, daysInRange, params.DateFrom, params.DateTo)
+
+	// Apply same filters as overall query
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		qByType = qByType.Where(f.Query, f.Args...)
 	}
 
-	// Build filter params
-	params := models.MeterHealthDetailParams{
-		ReadingFilterParams: models.ReadingFilterParams{
-			DateFrom:              dateFrom,
-			DateTo:                dateTo,
-			MeterNumber:           splitCSV(q.Get("meterNumber")),
-			Regions:               splitCSV(q.Get("region")),
-			Districts:             splitCSV(q.Get("district")),
-			Stations:              splitCSV(q.Get("station")),
-			Locations:             splitCSV(q.Get("location")),
-			BoundaryMeteringPoint: splitCSV(q.Get("boundaryMeteringPoint")),
-			MeterTypes:            splitCSV(q.Get("meterType")),
-			Voltages:              splitCSV(q.Get("voltage_kv")),
+	qByType = qByType.Group("mtr.meter_type").Order("mtr.meter_type")
+
+	var byMeterType []models.MeterHealthByMeterType
+	if err := qByType.Scan(ctx, &byMeterType); err != nil {
+		return nil, err
+	}
+
+	// Calculate health percentage
+	healthPercentage := 0.0
+	if overallResult.TotalMeters > 0 {
+		healthPercentage = float64(overallResult.OnlineMeters) * 100.0 / float64(overallResult.TotalMeters)
+	}
+
+	return &models.MeterHealthSummary{
+		TotalMeters:             overallResult.TotalMeters,
+		OnlineMeters:            overallResult.OnlineMeters,
+		OfflineMeters:           overallResult.OfflineMeters,
+		HealthPercentage:        healthPercentage,
+		AverageUptimePercentage: overallResult.AvgUptime,
+		ByMeterType:             byMeterType,
+		UptimeDistribution: models.MeterUptimeDistribution{
+			Excellent: overallResult.Excellent,
+			Good:      overallResult.Good,
+			Poor:      overallResult.Poor,
+			Critical:  overallResult.Critical,
 		},
-		Page:           page,
-		Limit:          limit,
-		Search:         q.Get("search"),
-		HealthCategory: healthCategory,
-		SortBy:         sortBy,
-		SortOrder:      sortOrder,
+	}, nil
+}
+
+// GetMeterHealthDetails returns paginated meter health details with filtering
+func (s *MeterService) GetMeterHealthDetails(
+	ctx context.Context,
+	params models.MeterHealthDetailParams,
+) (*models.MeterHealthDetailResponse, error) {
+
+	// Validate and set defaults
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.Limit <= 0 || params.Limit > 200 {
+		params.Limit = 50
+	}
+	if params.SortOrder == "" {
+		params.SortOrder = "desc"
 	}
 
-	// Call service
-	details, err := h.service.GetMeterHealthDetails(ctx, params)
+	// Calculate days in range for accurate uptime percentage
+	daysInRange := int(params.DateTo.Sub(params.DateFrom).Hours()/24) + 1
+
+	filters := buildReadingFilters(params.ReadingFilterParams)
+
+	// Build the main CTE with meter health calculations
+	baseCTE := s.db.NewSelect().
+		TableExpr("app.meters AS mtr").
+		Column("mtr.meter_number").
+		Column("mtr.meter_type").
+		Column("mtr.region").
+		Column("mtr.district").
+		Column("mtr.station").
+		Column("mtr.feeder_panel_name").
+		Column("mtr.location").
+		Column("mtr.voltage_kv").
+		Column("mtr.boundary_metering_point").
+		ColumnExpr(`
+			CASE
+				WHEN mcd.has_actual_data = true THEN 'ONLINE'
+				ELSE 'OFFLINE'
+			END as status
+		`).
+		ColumnExpr(`
+			CASE
+				WHEN mcd.uptime_percentage > 95 THEN 'excellent'
+				WHEN mcd.uptime_percentage >= 80 AND mcd.uptime_percentage <= 95 THEN 'good'
+				WHEN mcd.uptime_percentage >= 60 AND mcd.uptime_percentage < 80 THEN 'poor'
+				WHEN mcd.uptime_percentage < 60 THEN 'critical'
+				ELSE 'offline'
+			END as health_category
+		`).
+		ColumnExpr("COALESCE(mcd.uptime_percentage, 0) as uptime_percentage").
+		ColumnExpr("COALESCE(mcd.days_online, 0) as days_online").
+		ColumnExpr("COALESCE(mcd.days_offline, ?) as days_offline", daysInRange).
+		ColumnExpr("? as total_days", daysInRange).
+		ColumnExpr("mcd.last_seen_date").
+		ColumnExpr("COALESCE(mcd.total_consumption, 0) as total_consumption_kwh").
+		ColumnExpr(`
+			CASE
+				WHEN mcd.days_online > 0 THEN ROUND((mcd.total_consumption / mcd.days_online)::numeric, 2)
+				ELSE 0
+			END as avg_daily_consumption
+		`).
+		Join(`
+    LEFT JOIN (
+        SELECT
+            meter_number,
+            MAX(consumption_date) AS last_seen_date,
+            BOOL_OR(data_item_id != 'NO_DATA') AS has_actual_data,
+
+            COUNT(DISTINCT CASE
+                WHEN data_item_id != 'NO_DATA'
+                THEN DATE(consumption_date)
+            END) AS days_online,
+
+            COUNT(DISTINCT DATE(consumption_date))
+            - COUNT(DISTINCT CASE
+                WHEN data_item_id != 'NO_DATA'
+                THEN DATE(consumption_date)
+            END) AS days_offline,
+
+            COUNT(DISTINCT DATE(consumption_date)) AS total_days,
+
+            (
+                COUNT(DISTINCT CASE
+                    WHEN data_item_id != 'NO_DATA'
+                    THEN DATE(consumption_date)
+                END) * 100.0
+                /
+                NULLIF(COUNT(DISTINCT DATE(consumption_date)), 0)
+            ) AS uptime_percentage,
+
+            SUM(consumption) AS total_consumption
+        FROM app.meter_consumption_daily
+        WHERE consumption_date BETWEEN ? AND ?
+        GROUP BY meter_number
+    ) AS mcd ON mtr.meter_number = mcd.meter_number
+`, params.DateFrom, params.DateTo)
+
+
+	// Apply meter filters (skip date filters since they're in the subquery)
+	for _, f := range filters {
+		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
+			continue
+		}
+		baseCTE = baseCTE.Where(f.Query, f.Args...)
+	}
+
+	// Apply search filter
+	if params.Search != "" {
+		baseCTE = baseCTE.Where("mtr.meter_number ILIKE ?", "%"+params.Search+"%")
+	}
+
+	// Fast count query - wrap the CTE
+	countQuery := s.db.NewSelect().
+		TableExpr("(?) AS health_data", baseCTE).
+		ColumnExpr("COUNT(*)")
+
+	// Apply health category filter to count
+	if params.HealthCategory != "" {
+		countQuery = countQuery.Where("health_category = ?", strings.ToLower(params.HealthCategory))
+	}
+
+	totalCount, err := countQuery.Count(ctx)
 	if err != nil {
-		h.logr.Error("failed to get meter health details", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"success": false,
-			"error":   "failed to retrieve meter health details",
-		})
-		return
+		return nil, err
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"data":    details,
+	// Main query - reuse the CTE
+	q := s.db.NewSelect().
+		TableExpr("(?) AS health_data", baseCTE)
+
+	// Apply health category filter
+	if params.HealthCategory != "" {
+		q = q.Where("health_category = ?", strings.ToLower(params.HealthCategory))
+	}
+
+	// Apply sorting
+	sortOrder := "DESC"
+	if strings.ToLower(params.SortOrder) == "asc" {
+		sortOrder = "ASC"
+	}
+
+	switch params.SortBy {
+	case "uptime":
+		q = q.OrderExpr("uptime_percentage " + sortOrder)
+	case "meter_type":
+		q = q.OrderExpr("meter_type " + sortOrder)
+	case "last_seen":
+		q = q.OrderExpr("last_seen_date " + sortOrder + " NULLS LAST")
+	case "consumption":
+		q = q.OrderExpr("total_consumption_kwh " + sortOrder)
+	case "meter_number":
+		q = q.OrderExpr("meter_number " + sortOrder)
+	default:
+		q = q.OrderExpr("uptime_percentage " + sortOrder)
+	}
+
+	// Apply pagination
+	offset := (params.Page - 1) * params.Limit
+	q = q.Limit(params.Limit).Offset(offset)
+
+	// Execute query
+	var records []models.MeterHealthDetailRecord
+	if err := q.Scan(ctx, &records); err != nil {
+		return nil, err
+	}
+
+	// Calculate summary stats from results
+	var totalOnline, totalOffline int
+	var sumUptime float64
+	for _, r := range records {
+		if r.Status == "ONLINE" {
+			totalOnline++
+		} else {
+			totalOffline++
+		}
+		sumUptime += r.UptimePercentage
+	}
+
+	avgUptime := 0.0
+	if len(records) > 0 {
+		avgUptime = sumUptime / float64(len(records))
+	}
+
+	// Build response
+	totalPages := (totalCount + params.Limit - 1) / params.Limit
+	hasMore := params.Page < totalPages
+
+	// Build filters applied map
+	filtersApplied := map[string]interface{}{
+		"dateFrom": params.DateFrom.Format("2006-01-02"),
+		"dateTo":   params.DateTo.Format("2006-01-02"),
+	}
+	if len(params.Regions) > 0 {
+		filtersApplied["region"] = params.Regions
+	}
+	if len(params.MeterTypes) > 0 {
+		filtersApplied["meterType"] = params.MeterTypes
+	}
+	if params.Search != "" {
+		filtersApplied["search"] = params.Search
+	}
+	if params.HealthCategory != "" {
+		filtersApplied["healthCategory"] = params.HealthCategory
+	}
+	if params.SortBy != "" {
+		filtersApplied["sortBy"] = params.SortBy
+		filtersApplied["sortOrder"] = params.SortOrder
+	}
+
+	response := &models.MeterHealthDetailResponse{
+		Data:           records,
+		FiltersApplied: filtersApplied,
+	}
+	response.Pagination.Page = params.Page
+	response.Pagination.Limit = params.Limit
+	response.Pagination.TotalRecords = totalCount
+	response.Pagination.TotalPages = totalPages
+	response.Pagination.HasMore = hasMore
+
+	response.Summary.HealthCategory = params.HealthCategory
+	response.Summary.AverageUptime = avgUptime
+	response.Summary.TotalOnline = totalOnline
+	response.Summary.TotalOffline = totalOffline
+
+	return response, nil
+}
+
+// GetUniqueDistricts returns all unique districts from dbo_ecg table (whether meters exist or not)
+func (s *MeterService) GetUniqueDistricts(ctx context.Context, region string, meterTypes []string) ([]string, error) {
+	var districts []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.dbo_ecg AS e").
+		ColumnExpr("DISTINCT LOWER(e.district) as district").
+		Join("LEFT JOIN app.meters AS m ON LOWER(e.district) = LOWER(m.district)").
+		Where("e.district IS NOT NULL AND e.district != ''")
+
+	if region != "" {
+		q = q.Where("LOWER(e.region) = ?", strings.ToLower(region))
+	}
+
+	if len(meterTypes) > 0 {
+		// Only show districts that have meters of these types
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("district ASC")
+
+	if err := q.Scan(ctx, &districts); err != nil {
+		return nil, err
+	}
+
+	return districts, nil
+}
+
+// GetUniqueRegions returns all unique regions from dbo_ecg table (whether meters exist or not)
+func (s *MeterService) GetUniqueRegions(ctx context.Context, meterTypes []string) ([]string, error) {
+	var regions []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.dbo_ecg AS e").
+		ColumnExpr("DISTINCT LOWER(e.region) as region").
+		Join("LEFT JOIN app.meters AS m ON LOWER(e.region) = LOWER(m.region)").
+		Where("e.region IS NOT NULL AND e.region != ''")
+
+	if len(meterTypes) > 0 {
+		// Only show regions that have meters of these types
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("region ASC")
+
+	if err := q.Scan(ctx, &regions); err != nil {
+		return nil, err
+	}
+
+	return regions, nil
+}
+
+// GetUniqueStations returns all unique stations from meters table with left join on dbo_ecg
+func (s *MeterService) GetUniqueStations(ctx context.Context, region, district string, meterTypes []string) ([]string, error) {
+	var stations []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS m").
+		ColumnExpr("DISTINCT LOWER(m.station) as station").
+		Join("LEFT JOIN app.dbo_ecg AS e ON LOWER(m.district) = LOWER(e.district)").
+		Where("m.station IS NOT NULL AND m.station != ''")
+
+	if region != "" {
+		q = q.Where("LOWER(m.region) = ?", strings.ToLower(region))
+	}
+
+	if district != "" {
+		q = q.Where("LOWER(m.district) = ?", strings.ToLower(district))
+	}
+
+	if len(meterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("station ASC")
+
+	if err := q.Scan(ctx, &stations); err != nil {
+		return nil, err
+	}
+
+	return stations, nil
+}
+
+// GetUniqueLocations returns all unique locations from meters table with left join on dbo_ecg
+func (s *MeterService) GetUniqueLocations(ctx context.Context, region, district string, meterTypes []string) ([]string, error) {
+	var locations []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS m").
+		ColumnExpr("DISTINCT LOWER(m.location) as location").
+		Join("LEFT JOIN app.dbo_ecg AS e ON LOWER(m.district) = LOWER(e.district)").
+		Where("m.location IS NOT NULL AND m.location != ''")
+
+	if region != "" {
+		q = q.Where("LOWER(m.region) = ?", strings.ToLower(region))
+	}
+
+	if district != "" {
+		q = q.Where("LOWER(m.district) = ?", strings.ToLower(district))
+	}
+
+	if len(meterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("location ASC")
+
+	if err := q.Scan(ctx, &locations); err != nil {
+		return nil, err
+	}
+
+	return locations, nil
+}
+
+// GetUniqueBoundaryPoints returns all unique boundary metering points with left join on dbo_ecg
+func (s *MeterService) GetUniqueBoundaryPoints(ctx context.Context, region, district string, meterTypes []string) ([]string, error) {
+	var boundaryPoints []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS m").
+		ColumnExpr("DISTINCT LOWER(m.boundary_metering_point) as boundary_metering_point").
+		Join("LEFT JOIN app.dbo_ecg AS e ON LOWER(m.district) = LOWER(e.district)").
+		Where("m.boundary_metering_point IS NOT NULL AND m.boundary_metering_point != ''")
+
+	if region != "" {
+		q = q.Where("LOWER(m.region) = ?", strings.ToLower(region))
+	}
+
+	if district != "" {
+		q = q.Where("LOWER(m.district) = ?", strings.ToLower(district))
+	}
+
+	if len(meterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("boundary_metering_point ASC")
+
+	if err := q.Scan(ctx, &boundaryPoints); err != nil {
+		return nil, err
+	}
+
+	return boundaryPoints, nil
+}
+
+// GetUniqueVoltages returns all unique voltage levels with left join on dbo_ecg
+func (s *MeterService) GetUniqueVoltages(ctx context.Context, region, district string, meterTypes []string) ([]float64, error) {
+	var voltages []float64
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters AS m").
+		ColumnExpr("DISTINCT m.voltage_kv").
+		Join("LEFT JOIN app.dbo_ecg AS e ON LOWER(m.district) = LOWER(e.district)").
+		Where("m.voltage_kv IS NOT NULL")
+
+	if region != "" {
+		q = q.Where("LOWER(m.region) = ?", strings.ToLower(region))
+	}
+
+	if district != "" {
+		q = q.Where("LOWER(m.district) = ?", strings.ToLower(district))
+	}
+
+	if len(meterTypes) > 0 {
+		q = q.Where("m.meter_type IN (?)", bun.In(stringsToUpper(meterTypes)))
+	}
+
+	q = q.Order("m.voltage_kv ASC")
+
+	if err := q.Scan(ctx, &voltages); err != nil {
+		return nil, err
+	}
+
+	return voltages, nil
+}
+
+// GetUniqueMeterTypes returns all unique meter types (no join needed)
+func (s *MeterService) GetUniqueMeterTypes(ctx context.Context) ([]string, error) {
+	var meterTypes []string
+
+	q := s.db.NewSelect().
+		TableExpr("app.meters").
+		ColumnExpr("DISTINCT meter_type").
+		Where("meter_type IS NOT NULL AND meter_type != ''").
+		Order("meter_type ASC")
+
+	if err := q.Scan(ctx, &meterTypes); err != nil {
+		return nil, err
+	}
+
+	return meterTypes, nil
+}
+
+// GetRegionalMapConsumption returns consumption data by district with GeoJSON for mapping
+
+// GetRegionalMapConsumption returns consumption data by district with GeoJSON for mapping
+
+func (s *MeterService) GetRegionalMapConsumption(
+	ctx context.Context,
+	params models.RegionalMapParams,
+) (*models.RegionalMapResponse, error) {
+
+	// First, get ALL districts with their GeoJSON
+	var allDistricts []struct {
+		District string          `bun:"district"`
+		Region   string          `bun:"region"`
+		GeoJSON  json.RawMessage `bun:"geojson"`
+	}
+
+	// Query to get all districts from dbo_ecg
+	districtQuery := s.db.NewSelect().
+		Column("district").
+		Column("region").
+		ColumnExpr("ST_AsGeoJSON(the_geom)::jsonb as geojson").
+		TableExpr("app.dbo_ecg").
+		Where("district IS NOT NULL").
+		Where("region IS NOT NULL")
+
+	if params.Region != "" {
+		districtQuery = districtQuery.Where("LOWER(region) = ?", strings.ToLower(params.Region))
+	}
+
+	if params.District != "" {
+		districtQuery = districtQuery.Where("LOWER(district) = ?", strings.ToLower(params.District))
+	}
+
+	if err := districtQuery.Scan(ctx, &allDistricts); err != nil {
+		return nil, fmt.Errorf("failed to get districts: %w", err)
+	}
+
+	// Build the consumption query
+	var queryBuilder strings.Builder
+	var args []interface{}
+
+	// Start building the CTE
+	queryBuilder.WriteString(`
+        WITH district_consumption AS (
+            -- Try spatial join first (coordinates available)
+            SELECT
+                d.district,
+                d.region,
+                m.meter_type,
+                m.meter_number,
+                m.location,
+                m.station,
+                m.feeder_panel_name,
+                m.boundary_metering_point,
+                m.voltage_kv,
+                m.ic_og,
+                DATE(mcd.consumption_date) as consumption_date,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_import_kwh,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh,
+                'spatial' as match_type
+            FROM app.dbo_ecg d
+            INNER JOIN app.meters m
+                ON ST_Intersects(d.the_geom, ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326))
+                AND m.latitude IS NOT NULL
+                AND m.longitude IS NOT NULL
+            LEFT JOIN app.meter_consumption_daily mcd
+                ON m.meter_number = mcd.meter_number
+                AND mcd.consumption_date BETWEEN ? AND ?
+            LEFT JOIN app.data_item_mapping dim
+                ON mcd.data_item_id = dim.data_item_id
+            WHERE d.district IS NOT NULL
+                AND d.region IS NOT NULL
+                AND m.meter_type IS NOT NULL
+    `)
+
+	// Add date parameters for first UNION
+	args = append(args, params.DateFrom, params.DateTo)
+
+	// Add filters for first UNION
+	if len(params.MeterType) > 0 {
+		queryBuilder.WriteString(` AND m.meter_type IN (?)`)
+		args = append(args, bun.In(stringsToUpper(params.MeterType)))
+	}
+
+	if params.Region != "" {
+		queryBuilder.WriteString(` AND LOWER(d.region) = ?`)
+		args = append(args, strings.ToLower(params.Region))
+	}
+
+	if params.District != "" {
+		queryBuilder.WriteString(` AND LOWER(d.district) = ?`)
+		args = append(args, strings.ToLower(params.District))
+	}
+
+	// Close first UNION and start second
+	queryBuilder.WriteString(`
+            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station,
+                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name,
+                     m.ic_og, DATE(mcd.consumption_date)
+
+            UNION ALL
+
+            -- Fallback: District name matching (for meters without coordinates or not intersecting)
+            SELECT
+                d.district,
+                d.region,
+                m.meter_type,
+                m.meter_number,
+                m.location,
+                m.station,
+                m.feeder_panel_name,
+                m.boundary_metering_point,
+                m.voltage_kv,
+                m.ic_og,
+                DATE(mcd.consumption_date) as consumption_date,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_import_kwh,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh,
+                'district_name' as match_type
+            FROM app.dbo_ecg d
+            INNER JOIN app.meters m
+                ON LOWER(TRIM(d.district)) = LOWER(TRIM(m.district))
+                AND (m.latitude IS NULL OR m.longitude IS NULL)  -- Only meters without coordinates
+            LEFT JOIN app.meter_consumption_daily mcd
+                ON m.meter_number = mcd.meter_number
+                AND mcd.consumption_date BETWEEN ? AND ?
+            LEFT JOIN app.data_item_mapping dim
+                ON mcd.data_item_id = dim.data_item_id
+            WHERE d.district IS NOT NULL
+                AND d.region IS NOT NULL
+                AND m.meter_type IS NOT NULL
+                AND m.district IS NOT NULL
+    `)
+
+	// Add date parameters for second UNION
+	args = append(args, params.DateFrom, params.DateTo)
+
+	// Add filters for second UNION
+	if len(params.MeterType) > 0 {
+		queryBuilder.WriteString(` AND m.meter_type IN (?)`)
+		args = append(args, bun.In(stringsToUpper(params.MeterType)))
+	}
+
+	if params.Region != "" {
+		queryBuilder.WriteString(` AND LOWER(d.region) = ?`)
+		args = append(args, strings.ToLower(params.Region))
+	}
+
+	if params.District != "" {
+		queryBuilder.WriteString(` AND LOWER(d.district) = ?`)
+		args = append(args, strings.ToLower(params.District))
+	}
+
+	// Close second UNION and start third
+	queryBuilder.WriteString(`
+            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station,
+                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name,
+                     m.ic_og, DATE(mcd.consumption_date)
+
+            UNION ALL
+
+            -- Fallback 2: Region name matching (if district doesn't match but region does)
+            SELECT
+                d.district,
+                d.region,
+                m.meter_type,
+                m.meter_number,
+                m.location,
+                m.station,
+                m.feeder_panel_name,
+                m.boundary_metering_point,
+                m.voltage_kv,
+                m.ic_og,
+                DATE(mcd.consumption_date) as consumption_date,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_import_kwh,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh,
+                'region_name' as match_type
+            FROM app.dbo_ecg d
+            INNER JOIN app.meters m
+                ON LOWER(TRIM(d.region)) = LOWER(TRIM(m.region))
+                AND m.district IS NULL  -- Only meters with NULL district
+            LEFT JOIN app.meter_consumption_daily mcd
+                ON m.meter_number = mcd.meter_number
+                AND mcd.consumption_date BETWEEN ? AND ?
+            LEFT JOIN app.data_item_mapping dim
+                ON mcd.data_item_id = dim.data_item_id
+            WHERE d.district IS NOT NULL
+                AND d.region IS NOT NULL
+                AND m.meter_type IS NOT NULL
+                AND m.region IS NOT NULL
+    `)
+
+	// Add date parameters for third UNION
+	args = append(args, params.DateFrom, params.DateTo)
+
+	// Add filters for third UNION
+	if len(params.MeterType) > 0 {
+		queryBuilder.WriteString(` AND m.meter_type IN (?)`)
+		args = append(args, bun.In(stringsToUpper(params.MeterType)))
+	}
+
+	if params.Region != "" {
+		queryBuilder.WriteString(` AND LOWER(d.region) = ?`)
+		args = append(args, strings.ToLower(params.Region))
+	}
+
+	if params.District != "" {
+		queryBuilder.WriteString(` AND LOWER(d.district) = ?`)
+		args = append(args, strings.ToLower(params.District))
+	}
+
+	// Close the CTE and add final SELECT
+	queryBuilder.WriteString(`
+            GROUP BY d.district, d.region, d.the_geom, m.meter_type, m.meter_number, m.station,
+                     m.location, m.boundary_metering_point, m.voltage_kv, m.feeder_panel_name,
+                     m.ic_og, DATE(mcd.consumption_date)
+        )
+        SELECT
+            district,
+            region,
+            meter_type,
+            meter_number,
+            location,
+            station,
+            feeder_panel_name,
+            boundary_metering_point,
+            voltage_kv,
+            ic_og,
+            consumption_date,
+            total_import_kwh,
+            total_export_kwh
+        FROM district_consumption
+        ORDER BY district, meter_type, consumption_date
+    `)
+
+	// Execute query - use the variable name you declared
+	q := s.db.NewRaw(queryBuilder.String(), args...)
+
+	var consumptionRows []struct {
+		District              string    `bun:"district"`
+		Region                string    `bun:"region"`
+		MeterType             string    `bun:"meter_type"`
+		MeterNumber           string    `bun:"meter_number"`
+		Station               string    `bun:"station"`
+		Location              string    `bun:"location"`
+		FeederPanelName       string    `bun:"feeder_panel_name"`
+		BoundaryMeteringPoint string    `bun:"boundary_metering_point"`
+		VoltageKV             string    `bun:"voltage_kv"`
+		IC_OG                 string    `bun:"ic_og"`
+		ConsumptionDate       time.Time `bun:"consumption_date"`
+		TotalImportKWh        float64   `bun:"total_import_kwh"`
+		TotalExportKWh        float64   `bun:"total_export_kwh"`
+	}
+
+	// Use 'q' not 'q1'
+	if err := q.Scan(ctx, &consumptionRows); err != nil {
+		return nil, fmt.Errorf("failed to query consumption data: %w", err)
+	}
+
+	// Organize consumption data by district and meter type
+	consumptionMap := make(map[string]map[string][]models.DistrictMapConsumptionByType)
+
+	for _, row := range consumptionRows {
+		districtKey := fmt.Sprintf("%s|%s", row.District, row.Region)
+
+		if _, exists := consumptionMap[districtKey]; !exists {
+			consumptionMap[districtKey] = make(map[string][]models.DistrictMapConsumptionByType)
+		}
+
+		meterTypeKey := row.MeterType
+		if _, exists := consumptionMap[districtKey][meterTypeKey]; !exists {
+			consumptionMap[districtKey][meterTypeKey] = []models.DistrictMapConsumptionByType{}
+		}
+
+		consumption := models.DistrictMapConsumptionByType{
+			Date:                  row.ConsumptionDate,
+			MeterType:             row.MeterType,
+			MeterNumber:           row.MeterNumber,
+			Station:               row.Station,
+			VoltageKV:             row.VoltageKV,
+			Location:              row.Location,
+			BoundaryMeteringPoint: row.BoundaryMeteringPoint,
+			FeederPanelName:       row.FeederPanelName,
+			IC_OG:                 row.IC_OG,
+			TotalImportKWh:        row.TotalImportKWh,
+			TotalExportKWh:        row.TotalExportKWh,
+			NetConsumptionKWh:     row.TotalImportKWh - row.TotalExportKWh,
+		}
+
+		consumptionMap[districtKey][meterTypeKey] = append(
+			consumptionMap[districtKey][meterTypeKey],
+			consumption,
+		)
+	}
+
+	// Build final response
+	districts := make([]models.DistrictMapData, 0, len(allDistricts))
+
+	for _, districtInfo := range allDistricts {
+		districtKey := fmt.Sprintf("%s|%s", districtInfo.District, districtInfo.Region)
+
+		// Transform GeoJSON to Feature format
+		featureGeoJSON := transformToFeatureGeoJSON(districtInfo.GeoJSON, districtInfo.District, districtInfo.Region)
+
+		// Get consumption for this district
+		districtConsumption := consumptionMap[districtKey]
+
+		// Flatten consumption by meter type into single timeseries array
+		var allTimeseries []models.DistrictMapConsumptionByType
+
+		for _, timeseries := range districtConsumption {
+			allTimeseries = append(allTimeseries, timeseries...)
+		}
+
+		// Sort timeseries by date and meter type
+		sort.Slice(allTimeseries, func(i, j int) bool {
+			if allTimeseries[i].Date.Equal(allTimeseries[j].Date) {
+				return allTimeseries[i].MeterType < allTimeseries[j].MeterType
+			}
+			return allTimeseries[i].Date.Before(allTimeseries[j].Date)
+		})
+
+		// Create district data
+		districtData := models.DistrictMapData{
+			District:   districtInfo.District,
+			Region:     districtInfo.Region,
+			GeoJSON:    featureGeoJSON,
+			Timeseries: allTimeseries,
+		}
+
+		districts = append(districts, districtData)
+	}
+
+	// Sort districts by name
+	sort.Slice(districts, func(i, j int) bool {
+		return districts[i].District < districts[j].District
 	})
+
+	return &models.RegionalMapResponse{
+		Districts: districts,
+	}, nil
 }
 
-// GetRegions returns a list of unique regions from meters table
-func (h *MeterHandler) GetRegions(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	// Optional meter type filter
-	meterTypes := splitCSV(q.Get("meterType"))
-
-	regions, err := h.service.GetUniqueRegions(ctx, meterTypes)
-	if err != nil {
-		h.logr.Error("failed to get regions", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve regions",
-		})
-		return
-	}
-
-	response := map[string]interface{}{
-		"regions": regions,
-		"count":   len(regions),
-	}
-
-	if len(meterTypes) > 0 {
-		response["filters"] = map[string]interface{}{
-			"meterTypes": meterTypes,
-		}
-	}
-
-	writeJSON(w, http.StatusOK, response)
-}
-
-// GetDistricts returns a list of unique districts from meters table
-func (h *MeterHandler) GetDistricts(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	region := q.Get("region")
-	meterTypes := splitCSV(q.Get("meterType"))
-
-	districts, err := h.service.GetUniqueDistricts(ctx, region, meterTypes)
-	if err != nil {
-		h.logr.Error("failed to get districts", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve districts",
-		})
-		return
-	}
-
-	response := map[string]interface{}{
-		"districts": districts,
-		"count":     len(districts),
-	}
-
-	filters := map[string]interface{}{}
-	if region != "" {
-		filters["region"] = region
-	}
-	if len(meterTypes) > 0 {
-		filters["meterTypes"] = meterTypes
-	}
-	if len(filters) > 0 {
-		response["filters"] = filters
-	}
-
-	writeJSON(w, http.StatusOK, response)
-}
-
-// GetStations returns a list of unique stations from meters table
-func (h *MeterHandler) GetStations(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	region := q.Get("region")
-	district := q.Get("district")
-	meterTypes := splitCSV(q.Get("meterType"))
-
-	stations, err := h.service.GetUniqueStations(ctx, region, district, meterTypes)
-	if err != nil {
-		h.logr.Error("failed to get stations", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve stations",
-		})
-		return
-	}
-
-	response := map[string]interface{}{
-		"stations": stations,
-		"count":    len(stations),
-	}
-
-	filters := map[string]interface{}{}
-	if region != "" {
-		filters["region"] = region
-	}
-	if district != "" {
-		filters["district"] = district
-	}
-	if len(meterTypes) > 0 {
-		filters["meterTypes"] = meterTypes
-	}
-	if len(filters) > 0 {
-		response["filters"] = filters
-	}
-
-	writeJSON(w, http.StatusOK, response)
-}
-
-// GetLocations returns a list of unique locations from meters table
-func (h *MeterHandler) GetLocations(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	region := q.Get("region")
-	district := q.Get("district")
-	meterTypes := splitCSV(q.Get("meterType"))
-
-	locations, err := h.service.GetUniqueLocations(ctx, region, district, meterTypes)
-	if err != nil {
-		h.logr.Error("failed to get locations", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve locations",
-		})
-		return
-	}
-
-	response := map[string]interface{}{
-		"locations": locations,
-		"count":     len(locations),
-	}
-
-	filters := map[string]interface{}{}
-	if region != "" {
-		filters["region"] = region
-	}
-	if district != "" {
-		filters["district"] = district
-	}
-	if len(meterTypes) > 0 {
-		filters["meterTypes"] = meterTypes
-	}
-	if len(filters) > 0 {
-		response["filters"] = filters
-	}
-
-	writeJSON(w, http.StatusOK, response)
-}
-
-// GetBoundaryPoints returns a list of unique boundary metering points
-func (h *MeterHandler) GetBoundaryPoints(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	region := q.Get("region")
-	district := q.Get("district")
-	meterTypes := splitCSV(q.Get("meterType"))
-
-	boundaryPoints, err := h.service.GetUniqueBoundaryPoints(ctx, region, district, meterTypes)
-	if err != nil {
-		h.logr.Error("failed to get boundary points", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve boundary points",
-		})
-		return
-	}
-
-	response := map[string]interface{}{
-		"boundaryPoints": boundaryPoints,
-		"count":          len(boundaryPoints),
-	}
-
-	filters := map[string]interface{}{}
-	if region != "" {
-		filters["region"] = region
-	}
-	if district != "" {
-		filters["district"] = district
-	}
-	if len(meterTypes) > 0 {
-		filters["meterTypes"] = meterTypes
-	}
-	if len(filters) > 0 {
-		response["filters"] = filters
-	}
-
-	writeJSON(w, http.StatusOK, response)
-}
-
-// GetVoltages returns a list of unique voltage levels
-func (h *MeterHandler) GetVoltages(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	region := q.Get("region")
-	district := q.Get("district")
-	meterTypes := splitCSV(q.Get("meterType"))
-
-	voltages, err := h.service.GetUniqueVoltages(ctx, region, district, meterTypes)
-	if err != nil {
-		h.logr.Error("failed to get voltages", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to retrieve voltages",
-		})
-		return
-	}
-
-	response := map[string]interface{}{
-		"voltages": voltages,
-		"count":    len(voltages),
-	}
-
-	filters := map[string]interface{}{}
-	if region != "" {
-		filters["region"] = region
-	}
-	if district != "" {
-		filters["district"] = district
-	}
-	if len(meterTypes) > 0 {
-		filters["meterTypes"] = meterTypes
-	}
-	if len(filters) > 0 {
-		response["filters"] = filters
-	}
-
-	writeJSON(w, http.StatusOK, response)
-}
-
-// GetRegionalMapConsumption handles GET /api/v1/meters/consumption/regional-map
-func (h *MeterHandler) GetRegionalMapConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
+// GetRegionalEnergyBalance calculates energy balance with ALL filters properly applied
+func (s *MeterService) GetRegionalEnergyBalance(
+	ctx context.Context,
+	params models.EnergyBalanceParams,
+) (*models.EnergyBalanceResponse, error) {
 
 	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "dateTo must be after dateFrom",
-		})
-		return
+	if params.DateFrom.IsZero() || params.DateTo.IsZero() {
+		return nil, fmt.Errorf("date_from and date_to are required")
 	}
 
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// Build filters for internal consumption (BSP/DTX)
+	var internalConditions []string
+	var internalArgs []interface{}
+
+	// Date range (always required)
+	internalConditions = append(internalConditions, "DATE(mcd.consumption_date) BETWEEN ? AND ?")
+	internalArgs = append(internalArgs, params.DateFrom, params.DateTo)
+
+	// Region filter
+	if len(params.Regions) > 0 {
+		placeholders := make([]string, len(params.Regions))
+		for i := range params.Regions {
+			placeholders[i] = "?"
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		internalConditions = append(internalConditions, "LOWER(m.region) IN ("+strings.Join(placeholders, ",")+")")
+		for _, r := range stringsToLower(params.Regions) {
+			internalArgs = append(internalArgs, r)
 		}
-		return parts
 	}
 
-	// Build filter params
-	params := models.RegionalMapParams{
-		DateFrom:  dateFrom,
-		DateTo:    dateTo,
-		MeterType: splitCSV(q.Get("meterType")),
-		Region:    q.Get("region"),
-		District:  q.Get("district"),
-		Location:  q.Get("location"),
-	}
-
-	// Call service
-	result, err := h.service.GetRegionalMapConsumption(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get regional map consumption", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"success": false,
-			"error":   "failed to retrieve regional map data",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"data":    result,
-	})
-}
-
-// GetDistrictGeometries handles GET /api/v1/meters/geometries/districts
-func (h *MeterHandler) GetDistrictGeometries(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// District filter
+	if len(params.Districts) > 0 {
+		placeholders := make([]string, len(params.Districts))
+		for i := range params.Districts {
+			placeholders[i] = "?"
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		internalConditions = append(internalConditions, "LOWER(m.district) IN ("+strings.Join(placeholders, ",")+")")
+		for _, d := range stringsToLower(params.Districts) {
+			internalArgs = append(internalArgs, d)
 		}
-		return parts
 	}
 
-	regions := splitCSV(q.Get("region"))
-	districts := splitCSV(q.Get("district"))
-
-	// Call service
-	geometries, err := h.service.GetDistrictGeometries(ctx, regions, districts)
-	if err != nil {
-		h.logr.Error("failed to get district geometries", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"success": false,
-			"error":   "failed to retrieve district geometries",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"version": geometries.Version,
-		"data":    geometries,
-	})
-}
-
-// GetDistrictTimeseriesConsumption handles GET /api/v1/meters/consumption/districts-timeseries
-func (h *MeterHandler) GetDistrictTimeseriesConsumption(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "dateTo must be after dateFrom",
-		})
-		return
-	}
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// Station filter
+	if len(params.Stations) > 0 {
+		placeholders := make([]string, len(params.Stations))
+		for i := range params.Stations {
+			placeholders[i] = "?"
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		internalConditions = append(internalConditions, "LOWER(m.station) IN ("+strings.Join(placeholders, ",")+")")
+		for _, st := range stringsToLower(params.Stations) {
+			internalArgs = append(internalArgs, st)
 		}
-		return parts
 	}
 
-	// Build filter params
-	params := models.DistrictConsumptionParams{
-		DateFrom:  dateFrom,
-		DateTo:    dateTo,
-		MeterType: splitCSV(q.Get("meterType")),
-		Region:    splitCSV(q.Get("region")),
-		District:  splitCSV(q.Get("district")),
-	}
-
-	// Call service
-	timeseries, err := h.service.GetDistrictTimeseriesConsumption(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get district timeseries consumption", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"success": false,
-			"error":   "failed to retrieve district timeseries",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"data":    timeseries,
-	})
-}
-
-// GetRegionalEnergyBalance handles GET /api/energy-balance/regional
-// Updated handler with ALL filters parsed (like GetMeterStatus, GetDailyConsumption)
-
-// GetRegionalEnergyBalance handles GET /api/energy-balance/regional
-// Supports both singular and plural parameter names (e.g., region OR regions)
-func (h *MeterHandler) GetRegionalEnergyBalance(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
-
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
-
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "dateTo must be after dateFrom",
-		})
-		return
-	}
-
-	// Helper to get parameter value, trying both singular and plural forms
-	getParam := func(singular, plural string) string {
-		// Try singular first
-		if val := q.Get(singular); val != "" {
-			return val
+	// Location filter
+	if len(params.Locations) > 0 {
+		placeholders := make([]string, len(params.Locations))
+		for i := range params.Locations {
+			placeholders[i] = "?"
 		}
-		// Try plural
-		if val := q.Get(plural); val != "" {
-			return val
+		internalConditions = append(internalConditions, "LOWER(m.location) IN ("+strings.Join(placeholders, ",")+")")
+		for _, l := range stringsToLower(params.Locations) {
+			internalArgs = append(internalArgs, l)
 		}
-		return ""
 	}
 
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
+	// Meter number filter
+	if len(params.MeterNumber) > 0 {
+		placeholders := make([]string, len(params.MeterNumber))
+		for i := range params.MeterNumber {
+			placeholders[i] = "?"
 		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		internalConditions = append(internalConditions, "m.meter_number IN ("+strings.Join(placeholders, ",")+")")
+		for _, mn := range params.MeterNumber {
+			internalArgs = append(internalArgs, mn)
 		}
-		return parts
 	}
 
-	// Helper to parse voltages
-	parseVoltages := func(s string) []float64 {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		var voltages []float64
-		for _, p := range parts {
-			if v, err := strconv.ParseFloat(strings.TrimSpace(p), 64); err == nil {
-				voltages = append(voltages, v)
+	// Meter type filter (for BSP/DTX only)
+	meterTypeFilter := "m.meter_type IN ('BSP', 'DTX')"
+	if len(params.MeterTypes) > 0 {
+		// Only allow BSP/DTX for internal consumption
+		validTypes := []string{}
+		for _, mt := range params.MeterTypes {
+			upperType := strings.ToUpper(mt)
+			if upperType == "BSP" || upperType == "DTX" {
+				validTypes = append(validTypes, upperType)
 			}
 		}
-		return voltages
+		if len(validTypes) > 0 {
+			placeholders := make([]string, len(validTypes))
+			for i := range validTypes {
+				placeholders[i] = "?"
+			}
+			meterTypeFilter = "m.meter_type IN (" + strings.Join(placeholders, ",") + ")"
+			for _, vt := range validTypes {
+				internalArgs = append(internalArgs, vt)
+			}
+		} else {
+			// If they filtered for only REGIONAL_BOUNDARY, no internal consumption
+			meterTypeFilter = "1 = 0" // Return empty
+		}
 	}
 
-	// Parse ALL filter parameters (supporting both singular and plural)
-	params := models.EnergyBalanceParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(getParam("meterNumber", "meterNumbers")),
-		Regions:               splitCSV(getParam("region", "regions")),
-		Districts:             splitCSV(getParam("district", "districts")),
-		Stations:              splitCSV(getParam("station", "stations")),
-		Locations:             splitCSV(getParam("location", "locations")),
-		BoundaryMeteringPoint: splitCSV(getParam("boundaryMeteringPoint", "boundaryMeteringPoints")),
-		MeterTypes:            splitCSV(getParam("meterType", "meterTypes")),
-		Voltages:              parseVoltages(getParam("voltage", "voltages")),
+	// Voltage filter
+	if len(params.Voltages) > 0 {
+		placeholders := make([]string, len(params.Voltages))
+		for i := range params.Voltages {
+			placeholders[i] = "?"
+		}
+		internalConditions = append(internalConditions, "m.voltage_kv IN ("+strings.Join(placeholders, ",")+")")
+		for _, v := range params.Voltages {
+			internalArgs = append(internalArgs, v)
+		}
 	}
 
-	// Call service
-	response, err := h.service.GetRegionalEnergyBalance(ctx, params)
+	// Build WHERE clause for internal consumption
+	internalWhereClause := meterTypeFilter + " AND mcd.data_item_id != 'NO_DATA' AND di.system_name = 'import_kwh'"
+	if len(internalConditions) > 0 {
+		internalWhereClause += " AND " + strings.Join(internalConditions, " AND ")
+	}
+
+	// Build filters for boundary flows
+	var boundaryConditions []string
+	var boundaryArgs []interface{}
+
+	// Date range (always required)
+	boundaryConditions = append(boundaryConditions, "DATE(mcd.consumption_date) BETWEEN ? AND ?")
+	boundaryArgs = append(boundaryArgs, params.DateFrom, params.DateTo)
+
+	// Location filter (for boundary meters)
+	if len(params.Locations) > 0 {
+		placeholders := make([]string, len(params.Locations))
+		for i := range params.Locations {
+			placeholders[i] = "?"
+		}
+		boundaryConditions = append(boundaryConditions, "LOWER(m.location) IN ("+strings.Join(placeholders, ",")+")")
+		for _, l := range stringsToLower(params.Locations) {
+			boundaryArgs = append(boundaryArgs, l)
+		}
+	}
+
+	// Boundary metering point filter
+	if len(params.BoundaryMeteringPoint) > 0 {
+		placeholders := make([]string, len(params.BoundaryMeteringPoint))
+		for i := range params.BoundaryMeteringPoint {
+			placeholders[i] = "?"
+		}
+		boundaryConditions = append(boundaryConditions, "LOWER(m.boundary_metering_point) IN ("+strings.Join(placeholders, ",")+")")
+		for _, bmp := range stringsToLower(params.BoundaryMeteringPoint) {
+			boundaryArgs = append(boundaryArgs, bmp)
+		}
+	}
+
+	// Meter number filter (for boundary meters)
+	if len(params.MeterNumber) > 0 {
+		placeholders := make([]string, len(params.MeterNumber))
+		for i := range params.MeterNumber {
+			placeholders[i] = "?"
+		}
+		boundaryConditions = append(boundaryConditions, "m.meter_number IN ("+strings.Join(placeholders, ",")+")")
+		for _, mn := range params.MeterNumber {
+			boundaryArgs = append(boundaryArgs, mn)
+		}
+	}
+
+	// Voltage filter (for boundary meters)
+	if len(params.Voltages) > 0 {
+		placeholders := make([]string, len(params.Voltages))
+		for i := range params.Voltages {
+			placeholders[i] = "?"
+		}
+		boundaryConditions = append(boundaryConditions, "m.voltage_kv IN ("+strings.Join(placeholders, ",")+")")
+		for _, v := range params.Voltages {
+			boundaryArgs = append(boundaryArgs, v)
+		}
+	}
+
+	// Build WHERE clause for boundary flows
+	boundaryWhereClause := "m.meter_type = 'REGIONAL_BOUNDARY' AND mcd.data_item_id != 'NO_DATA' AND m.boundary_metering_point IS NOT NULL AND m.boundary_metering_point LIKE '%/%' AND di.system_name IN ('import_kwh', 'export_kwh')"
+	if len(boundaryConditions) > 0 {
+		boundaryWhereClause += " AND " + strings.Join(boundaryConditions, " AND ")
+	}
+
+	// Build final region filter for the outer query (CRITICAL!)
+	var finalRegionFilter string
+	var finalRegionArgs []interface{}
+	if len(params.Regions) > 0 {
+		placeholders := make([]string, len(params.Regions))
+		for i := range params.Regions {
+			placeholders[i] = "?"
+		}
+		finalRegionFilter = "AND LOWER(COALESCE(i.region, b.region)) IN (" + strings.Join(placeholders, ",") + ")"
+		for _, r := range stringsToLower(params.Regions) {
+			finalRegionArgs = append(finalRegionArgs, r)
+		}
+	}
+
+	// Build the complete energy balance query
+	query := `
+		WITH
+		-- 0. Get valid regions from m.region (BSP/DTX meters only - our source of truth)
+		valid_regions AS (
+			SELECT DISTINCT LOWER(TRIM(region)) as region_name
+			FROM app.meters
+			WHERE region IS NOT NULL
+			  AND TRIM(region) != ''
+			  AND meter_type IN ('BSP', 'DTX')
+		),
+		-- 1. Internal consumption (BSP - DTX) for each region
+		internal_consumption AS (
+			SELECT
+				COALESCE(LOWER(m.region), 'unknown') as region,
+				DATE(mcd.consumption_date) as date,
+				SUM(CASE WHEN m.meter_type = 'BSP' AND di.system_name = 'import_kwh'
+						 THEN mcd.consumption ELSE 0 END) as bsp_import,
+				SUM(CASE WHEN m.meter_type = 'DTX' AND di.system_name = 'import_kwh'
+						 THEN mcd.consumption ELSE 0 END) as dtx_import,
+				SUM(CASE WHEN m.meter_type = 'BSP' AND di.system_name = 'import_kwh'
+						 THEN mcd.consumption
+						 WHEN m.meter_type = 'DTX' AND di.system_name = 'import_kwh'
+						 THEN -mcd.consumption
+						 ELSE 0 END) as internal_net,
+				COUNT(DISTINCT CASE WHEN m.meter_type = 'BSP' THEN m.meter_number END) as bsp_meter_count,
+				COUNT(DISTINCT CASE WHEN m.meter_type = 'DTX' THEN m.meter_number END) as dtx_meter_count
+			FROM app.meter_consumption_daily mcd
+			JOIN app.meters m ON m.meter_number = mcd.meter_number
+			JOIN app.data_item_mapping di ON di.data_item_id = mcd.data_item_id
+			WHERE ` + internalWhereClause + `
+			GROUP BY COALESCE(LOWER(m.region), 'unknown'), DATE(mcd.consumption_date)
+		),
+		-- 2. Parse boundary metering points
+		boundary_flows_parsed AS (
+			SELECT
+				DATE(mcd.consumption_date) as date,
+				m.meter_number,
+				m.boundary_metering_point,
+				m.location,
+				m.voltage_kv,
+				LOWER(TRIM(SPLIT_PART(m.boundary_metering_point, '/', 1))) as region_a,
+				LOWER(TRIM(SPLIT_PART(m.boundary_metering_point, '/', 2))) as region_b,
+				SUM(CASE WHEN di.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END) as import_kwh,
+				SUM(CASE WHEN di.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END) as export_kwh,
+				COUNT(*) as reading_count,
+				CASE
+					WHEN COUNT(*) >= 48 THEN 'complete'
+					WHEN COUNT(*) >= 24 THEN 'partial'
+					ELSE 'incomplete'
+				END as data_quality
+			FROM app.meter_consumption_daily mcd
+			JOIN app.meters m ON m.meter_number = mcd.meter_number
+			JOIN app.data_item_mapping di ON di.data_item_id = mcd.data_item_id
+			WHERE ` + boundaryWhereClause + `
+			GROUP BY
+				DATE(mcd.consumption_date),
+				m.meter_number,
+				m.boundary_metering_point,
+				m.location,
+				m.voltage_kv
+		),
+		-- 3. Validate that BOTH regions exist in valid_regions
+		boundary_flows_validated AS (
+			SELECT
+				bfp.*,
+				EXISTS (SELECT 1 FROM valid_regions WHERE region_name = bfp.region_a) as region_a_valid,
+				EXISTS (SELECT 1 FROM valid_regions WHERE region_name = bfp.region_b) as region_b_valid
+			FROM boundary_flows_parsed bfp
+		),
+		-- 4. Create boundary flow entries for BOTH regions (if both valid)
+		boundary_flows_per_region AS (
+			-- Entries for region_a
+			SELECT
+				date,
+				region_a as region,
+				meter_number,
+				boundary_metering_point,
+				location,
+				voltage_kv,
+				region_b as connected_region,
+				import_kwh,
+				export_kwh,
+				import_kwh - export_kwh as net_flow,
+				reading_count,
+				data_quality,
+				region_a_valid,
+				region_b_valid
+			FROM boundary_flows_validated
+			WHERE region_a_valid = true
+
+			UNION ALL
+
+			-- Entries for region_b (swapped perspective)
+			SELECT
+				date,
+				region_b as region,
+				meter_number,
+				boundary_metering_point,
+				location,
+				voltage_kv,
+				region_a as connected_region,
+				export_kwh as import_kwh,
+				import_kwh as export_kwh,
+				export_kwh - import_kwh as net_flow,
+				reading_count,
+				data_quality,
+				region_a_valid,
+				region_b_valid
+			FROM boundary_flows_validated
+			WHERE region_b_valid = true
+		),
+		-- 5. Build boundary meter details for each region
+		boundary_meter_details AS (
+			SELECT
+				date,
+				region,
+				jsonb_agg(
+					jsonb_build_object(
+						'meter_number', meter_number,
+						'boundary_metering_point', boundary_metering_point,
+						'connected_region', connected_region,
+						'location', location,
+						'voltage_kv', voltage_kv,
+						'import_kwh', import_kwh,
+						'export_kwh', export_kwh,
+						'net_flow', net_flow,
+						'reading_count', reading_count,
+						'data_quality', data_quality
+					) ORDER BY meter_number
+				) as boundary_meters_json
+			FROM boundary_flows_per_region
+			GROUP BY date, region
+		),
+		-- 6. Aggregate by connected region AND location
+		boundary_by_connected_region_and_location AS (
+			SELECT
+				date,
+				region,
+				connected_region,
+				location,
+				SUM(import_kwh) as location_import,
+				SUM(export_kwh) as location_export,
+				SUM(net_flow) as location_net_flow
+			FROM boundary_flows_per_region
+			GROUP BY date, region, connected_region, location
+		),
+		-- 6b. Aggregate totals by connected region (without location)
+		boundary_by_connected_region AS (
+			SELECT
+				date,
+				region,
+				connected_region,
+				SUM(import_kwh) as total_import_from_region,
+				SUM(export_kwh) as total_export_to_region,
+				SUM(net_flow) as net_flow
+			FROM boundary_flows_per_region
+			GROUP BY date, region, connected_region
+		),
+		-- 7. Build by_location map for each connected region
+		boundary_location_map AS (
+			SELECT
+				date,
+				region,
+				connected_region,
+				jsonb_object_agg(
+					location,
+					jsonb_build_object(
+						'location', location,
+						'import_kwh', location_import,
+						'export_kwh', location_export,
+						'net_flow', location_net_flow
+					)
+				) as by_location_json
+			FROM boundary_by_connected_region_and_location
+			GROUP BY date, region, connected_region
+		),
+		-- 8. Build by_connected_region JSON map with location breakdown
+		boundary_connected_region_map AS (
+			SELECT
+				bcr.date,
+				bcr.region,
+				jsonb_object_agg(
+					bcr.connected_region,
+					jsonb_build_object(
+						'connected_region', bcr.connected_region,
+						'total_import_from_them', bcr.total_import_from_region,
+						'total_export_to_them', bcr.total_export_to_region,
+						'net_flow', bcr.net_flow,
+						'flow_balance', CASE
+							WHEN bcr.net_flow > 10 THEN 'importing'
+							WHEN bcr.net_flow < -10 THEN 'exporting'
+							ELSE 'balanced'
+						END,
+						'by_location', COALESCE(blm.by_location_json, '{}'::jsonb)
+					)
+				) as by_connected_region_json
+			FROM boundary_by_connected_region bcr
+			LEFT JOIN boundary_location_map blm
+				ON bcr.date = blm.date
+				AND bcr.region = blm.region
+				AND bcr.connected_region = blm.connected_region
+			GROUP BY bcr.date, bcr.region
+		),
+		-- 9. Aggregate total boundary flows by region
+		boundary_totals AS (
+			SELECT
+				date,
+				region,
+				SUM(import_kwh) as total_import,
+				SUM(export_kwh) as total_export,
+				SUM(net_flow) as net_boundary_flow,
+				COUNT(DISTINCT meter_number) as boundary_meter_count
+			FROM boundary_flows_per_region
+			GROUP BY date, region
+		)
+		-- 10. Final result combining internal consumption and boundary flows
+		SELECT
+			COALESCE(i.region, b.region) as region,
+			COALESCE(i.date, b.date) as date,
+			-- Internal consumption
+			COALESCE(i.bsp_import, 0) as bsp_import,
+			COALESCE(i.dtx_import, 0) as dtx_import,
+			COALESCE(i.internal_net, 0) as internal_net_consumption,
+			COALESCE(i.bsp_meter_count, 0) as bsp_meter_count,
+			COALESCE(i.dtx_meter_count, 0) as dtx_meter_count,
+			-- Boundary flows
+			COALESCE(b.total_import, 0) as boundary_total_import,
+			COALESCE(b.total_export, 0) as boundary_total_export,
+			COALESCE(b.net_boundary_flow, 0) as net_boundary_flow,
+			COALESCE(b.boundary_meter_count, 0) as boundary_meter_count,
+			COALESCE(bmd.boundary_meters_json, '[]'::jsonb) as boundary_meters_json,
+			COALESCE(bcr.by_connected_region_json, '{}'::jsonb) as by_connected_region_json,
+			-- Total
+			COALESCE(i.internal_net, 0) + COALESCE(b.net_boundary_flow, 0) as total_net_consumption
+		FROM internal_consumption i
+		FULL OUTER JOIN boundary_totals b
+			ON i.region = b.region AND i.date = b.date
+		LEFT JOIN boundary_meter_details bmd
+			ON COALESCE(i.region, b.region) = bmd.region
+			AND COALESCE(i.date, b.date) = bmd.date
+		LEFT JOIN boundary_connected_region_map bcr
+			ON COALESCE(i.region, b.region) = bcr.region
+			AND COALESCE(i.date, b.date) = bcr.date
+		WHERE COALESCE(i.region, b.region) IS NOT NULL
+			AND COALESCE(i.date, b.date) IS NOT NULL
+			` + finalRegionFilter + `
+		ORDER BY COALESCE(i.date, b.date), COALESCE(i.region, b.region)
+	`
+
+	// Combine all arguments (order matters!)
+	args := append(internalArgs, boundaryArgs...)
+	args = append(args, finalRegionArgs...)
+
+	// Define raw result structure from query
+	type rawResult struct {
+		Region                 string          `bun:"region"`
+		Date                   time.Time       `bun:"date"`
+		BSPImport              float64         `bun:"bsp_import"`
+		DTXImport              float64         `bun:"dtx_import"`
+		InternalNetConsumption float64         `bun:"internal_net_consumption"`
+		BSPMeterCount          int             `bun:"bsp_meter_count"`
+		DTXMeterCount          int             `bun:"dtx_meter_count"`
+		BoundaryTotalImport    float64         `bun:"boundary_total_import"`
+		BoundaryTotalExport    float64         `bun:"boundary_total_export"`
+		NetBoundaryFlow        float64         `bun:"net_boundary_flow"`
+		BoundaryMeterCount     int             `bun:"boundary_meter_count"`
+		BoundaryMetersJSON     json.RawMessage `bun:"boundary_meters_json"`
+		ByConnectedRegionJSON  json.RawMessage `bun:"by_connected_region_json"`
+		TotalNetConsumption    float64         `bun:"total_net_consumption"`
+	}
+
+	// Execute query
+	var rawResults []rawResult
+	err := s.db.NewRaw(query, args...).Scan(ctx, &rawResults)
 	if err != nil {
-		h.logr.Error("failed to get regional energy balance", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"success": false,
-			"error":   "failed to calculate energy balance",
-		})
-		return
+		return nil, fmt.Errorf("failed to calculate energy balance: %w", err)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"data":    response.Data,
-		"summary": response.Summary,
-	})
+	// Transform raw results into enhanced structure
+	results := make([]models.RegionalEnergyBalance, len(rawResults))
+
+	for i, raw := range rawResults {
+		// Parse boundary meters JSON (handle null/empty cases)
+		var boundaryMeters []models.BoundaryMeterDetail
+		if len(raw.BoundaryMetersJSON) > 0 &&
+			string(raw.BoundaryMetersJSON) != "[]" &&
+			string(raw.BoundaryMetersJSON) != "null" {
+			if err := json.Unmarshal(raw.BoundaryMetersJSON, &boundaryMeters); err != nil {
+				boundaryMeters = []models.BoundaryMeterDetail{}
+			}
+		} else {
+			boundaryMeters = []models.BoundaryMeterDetail{}
+		}
+
+		// Parse by_connected_region JSON map
+		var byConnectedRegion map[string]models.RegionFlowDetail
+		if len(raw.ByConnectedRegionJSON) > 0 &&
+			string(raw.ByConnectedRegionJSON) != "{}" &&
+			string(raw.ByConnectedRegionJSON) != "null" {
+			if err := json.Unmarshal(raw.ByConnectedRegionJSON, &byConnectedRegion); err != nil {
+				byConnectedRegion = make(map[string]models.RegionFlowDetail)
+			}
+		} else {
+			byConnectedRegion = make(map[string]models.RegionFlowDetail)
+		}
+
+		// Calculate metrics
+		var crossBoundaryDependency, internalSufficiency float64
+		if raw.TotalNetConsumption > 0 {
+			crossBoundaryDependency = (raw.NetBoundaryFlow / raw.TotalNetConsumption) * 100
+		}
+		if raw.TotalNetConsumption != 0 {
+			internalSufficiency = (raw.InternalNetConsumption / raw.TotalNetConsumption) * 100
+		}
+
+		// Determine dominant flow direction
+		dominantFlow := "balanced"
+		if raw.BoundaryTotalImport > raw.BoundaryTotalExport*1.1 {
+			dominantFlow = "net_importer"
+		} else if raw.BoundaryTotalExport > raw.BoundaryTotalImport*1.1 {
+			dominantFlow = "net_exporter"
+		}
+
+		// Determine balance type
+		var balanceType string
+		if internalSufficiency >= 95 {
+			balanceType = "self_sufficient"
+		} else if raw.NetBoundaryFlow > 0 {
+			balanceType = "net_importer"
+		} else if raw.NetBoundaryFlow < 0 {
+			balanceType = "net_exporter"
+		} else {
+			balanceType = "balanced"
+		}
+
+		// Generate flags
+		var flags []string
+		if crossBoundaryDependency > 50 {
+			flags = append(flags, "critical_import_dependency")
+		} else if crossBoundaryDependency > 30 {
+			flags = append(flags, "heavy_cross_boundary_importer")
+		}
+		if math.Abs(crossBoundaryDependency) > 30 && raw.NetBoundaryFlow < 0 {
+			flags = append(flags, "heavy_cross_boundary_exporter")
+		}
+		if raw.BoundaryMeterCount == 0 {
+			flags = append(flags, "isolated_region")
+		} else if raw.BoundaryMeterCount >= 5 {
+			flags = append(flags, "highly_interconnected")
+		}
+		if raw.BSPMeterCount < 2 {
+			flags = append(flags, "limited_bsp_coverage")
+		}
+		if raw.DTXMeterCount < 5 {
+			flags = append(flags, "limited_dtx_coverage")
+		}
+
+		// Build final result
+		results[i] = models.RegionalEnergyBalance{
+			Region: raw.Region,
+			Date:   raw.Date,
+			InternalConsumption: models.InternalConsumptionDetail{
+				BSPImport:     raw.BSPImport,
+				DTXImport:     raw.DTXImport,
+				NetInternal:   raw.InternalNetConsumption,
+				BSPMeterCount: raw.BSPMeterCount,
+				DTXMeterCount: raw.DTXMeterCount,
+			},
+			CrossBoundaryFlows: models.CrossBoundaryFlowDetail{
+				BoundaryMeters:          boundaryMeters,
+				ByConnectedRegion:       byConnectedRegion,
+				TotalImportKWh:          raw.BoundaryTotalImport,
+				TotalExportKWh:          raw.BoundaryTotalExport,
+				NetCrossBoundaryFlow:    raw.NetBoundaryFlow,
+				BoundaryMeterCount:      raw.BoundaryMeterCount,
+				IsNetImporter:           raw.NetBoundaryFlow > 0,
+				CrossBoundaryDependency: math.Round(crossBoundaryDependency*100) / 100,
+				DominantFlowDirection:   dominantFlow,
+			},
+			TotalNetConsumption: raw.TotalNetConsumption,
+			BalanceAnalysis: models.BalanceAnalysis{
+				InternalSufficiency:   math.Round(internalSufficiency*100) / 100,
+				CrossBoundaryReliance: math.Round(math.Abs(crossBoundaryDependency)*100) / 100,
+				BalanceType:           balanceType,
+				Flags:                 flags,
+			},
+		}
+	}
+
+	// Build response with summary
+	response := &models.EnergyBalanceResponse{
+		Data: results,
+	}
+
+	response.Summary.DateRange.From = params.DateFrom.Format("2006-01-02")
+	response.Summary.DateRange.To = params.DateTo.Format("2006-01-02")
+
+	// Calculate aggregate metrics
+	regionsMap := make(map[string]bool)
+	var totalBSP, totalDTX, totalInternal, totalBoundary, totalNet float64
+
+	for _, r := range results {
+		regionsMap[r.Region] = true
+		totalBSP += r.InternalConsumption.BSPImport
+		totalDTX += r.InternalConsumption.DTXImport
+		totalInternal += r.InternalConsumption.NetInternal
+		totalBoundary += r.CrossBoundaryFlows.NetCrossBoundaryFlow
+		totalNet += r.TotalNetConsumption
+	}
+
+	response.Summary.TotalRegions = len(regionsMap)
+	response.Summary.Metrics.TotalBSPImport = math.Round(totalBSP*100) / 100
+	response.Summary.Metrics.TotalDTXImport = math.Round(totalDTX*100) / 100
+	response.Summary.Metrics.TotalInternalNet = math.Round(totalInternal*100) / 100
+	response.Summary.Metrics.TotalCrossBoundaryNet = math.Round(totalBoundary*100) / 100
+	response.Summary.Metrics.TotalNetConsumption = math.Round(totalNet*100) / 100
+
+	if len(results) > 0 {
+		response.Summary.Metrics.AverageDailyConsumption = math.Round((totalNet/float64(len(results)))*100) / 100
+	}
+
+	return response, nil
 }
 
-// GetRegionalEnergyBalanceSummary handles GET /api/energy-balance/regional/summary
-// Supports both singular and plural parameter names
-func (h *MeterHandler) GetRegionalEnergyBalanceSummary(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-	layout := "2006-01-02"
+// GetRegionalEnergyBalanceSummary returns aggregated balance by region over entire date range
+func (s *MeterService) GetRegionalEnergyBalanceSummary(
+	ctx context.Context,
+	params models.EnergyBalanceParams,
+) ([]models.RegionalEnergyBalanceSummary, error) {
 
-	// Parse and validate dates
-	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	detailedResponse, err := s.GetRegionalEnergyBalance(ctx, params)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateFrom parameter, expected format: YYYY-MM-DD",
-		})
-		return
+		return nil, err
 	}
 
-	dateTo, err := time.Parse(layout, q.Get("dateTo"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "invalid dateTo parameter, expected format: YYYY-MM-DD",
-		})
-		return
-	}
+	regionMap := make(map[string]*models.RegionalEnergyBalanceSummary)
 
-	// Validate date range
-	if dateTo.Before(dateFrom) {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"success": false,
-			"error":   "dateTo must be after dateFrom",
-		})
-		return
-	}
-
-	// Helper to get parameter value, trying both singular and plural forms
-	getParam := func(singular, plural string) string {
-		// Try singular first
-		if val := q.Get(singular); val != "" {
-			return val
-		}
-		// Try plural
-		if val := q.Get(plural); val != "" {
-			return val
-		}
-		return ""
-	}
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
-	}
-
-	// Helper to parse voltages
-	parseVoltages := func(s string) []float64 {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		var voltages []float64
-		for _, p := range parts {
-			if v, err := strconv.ParseFloat(strings.TrimSpace(p), 64); err == nil {
-				voltages = append(voltages, v)
+	for _, r := range detailedResponse.Data {
+		if _, exists := regionMap[r.Region]; !exists {
+			regionMap[r.Region] = &models.RegionalEnergyBalanceSummary{
+				Region: r.Region,
 			}
 		}
-		return voltages
+
+		summary := regionMap[r.Region]
+		summary.TotalBSPImport += r.InternalConsumption.BSPImport
+		summary.TotalDTXImport += r.InternalConsumption.DTXImport
+		summary.TotalInternalNet += r.InternalConsumption.NetInternal
+		summary.TotalCrossBoundaryNet += r.CrossBoundaryFlows.NetCrossBoundaryFlow
+		summary.TotalNetConsumption += r.TotalNetConsumption
+		summary.DayCount++
 	}
 
-	// Parse ALL filter parameters (supporting both singular and plural)
-	params := models.EnergyBalanceParams{
-		DateFrom:              dateFrom,
-		DateTo:                dateTo,
-		MeterNumber:           splitCSV(getParam("meterNumber", "meterNumbers")),
-		Regions:               splitCSV(getParam("region", "regions")),
-		Districts:             splitCSV(getParam("district", "districts")),
-		Stations:              splitCSV(getParam("station", "stations")),
-		Locations:             splitCSV(getParam("location", "locations")),
-		BoundaryMeteringPoint: splitCSV(getParam("boundaryMeteringPoint", "boundaryMeteringPoints")),
-		MeterTypes:            splitCSV(getParam("meterType", "meterTypes")),
-		Voltages:              parseVoltages(getParam("voltage", "voltages")),
+	results := make([]models.RegionalEnergyBalanceSummary, 0, len(regionMap))
+	for _, summary := range regionMap {
+		if summary.DayCount > 0 {
+			summary.AverageDailyConsumption = math.Round((summary.TotalNetConsumption/float64(summary.DayCount))*100) / 100
+		}
+		summary.TotalBSPImport = math.Round(summary.TotalBSPImport*100) / 100
+		summary.TotalDTXImport = math.Round(summary.TotalDTXImport*100) / 100
+		summary.TotalInternalNet = math.Round(summary.TotalInternalNet*100) / 100
+		summary.TotalCrossBoundaryNet = math.Round(summary.TotalCrossBoundaryNet*100) / 100
+		summary.TotalNetConsumption = math.Round(summary.TotalNetConsumption*100) / 100
+
+		results = append(results, *summary)
 	}
 
-	// Call service
-	summaries, err := h.service.GetRegionalEnergyBalanceSummary(ctx, params)
-	if err != nil {
-		h.logr.Error("failed to get regional energy balance summary", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"success": false,
-			"error":   "failed to calculate summary",
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"data":    summaries,
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Region < results[j].Region
 	})
+
+	return results, nil
 }
 
-// GetRegionGeometries handles GET /api/regions/geometries
-func (h *MeterHandler) GetRegionGeometries(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	q := r.URL.Query()
-
-	// Helper to split CSV parameters
-	splitCSV := func(s string) []string {
-		if s == "" {
-			return nil
-		}
-		parts := strings.Split(s, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
-		}
-		return parts
+// Helper function to transform raw GeoJSON to Feature format
+func transformToFeatureGeoJSON(rawGeoJSON json.RawMessage, district, region string) json.RawMessage {
+	type Geometry struct {
+		Type        string        `json:"type"`
+		Coordinates [][][]float64 `json:"coordinates"`
 	}
 
-	// Parse region filter (optional)
-	regions := splitCSV(q.Get("regions"))
-	// Also support singular form
-	if len(regions) == 0 {
-		regions = splitCSV(q.Get("region"))
+	type FeatureProperties struct {
+		Name   string `json:"name"`
+		Region string `json:"region"`
 	}
 
-	// Call service
-	response, err := h.service.GetRegionGeometries(ctx, regions)
+	type Feature struct {
+		Type       string            `json:"type"`
+		Properties FeatureProperties `json:"properties"`
+		Geometry   Geometry          `json:"geometry"`
+	}
+
+	// Parse the raw geometry
+	var geometry Geometry
+	if err := json.Unmarshal(rawGeoJSON, &geometry); err != nil {
+		// If parsing fails, return empty feature
+		geometry = Geometry{
+			Type:        "Polygon",
+			Coordinates: [][][]float64{},
+		}
+	}
+
+	feature := Feature{
+		Type: "Feature",
+		Properties: FeatureProperties{
+			Name:   district,
+			Region: region,
+		},
+		Geometry: geometry,
+	}
+
+	featureJSON, _ := json.Marshal(feature)
+	return featureJSON
+}
+
+// Helper to generate time points
+func generateTimePoints(from, to time.Time, interval string) []string {
+	var timePoints []string
+
+	current := from
+	for !current.After(to) {
+		timePoints = append(timePoints, current.Format("2006-01-02"))
+
+		switch interval {
+		case "daily":
+			current = current.AddDate(0, 0, 1)
+		case "weekly":
+			current = current.AddDate(0, 0, 7)
+		case "monthly":
+			current = current.AddDate(0, 1, 0)
+		default:
+			current = current.AddDate(0, 0, 1)
+		}
+	}
+
+	return timePoints
+}
+
+// GetDistrictGeometries returns simplified district boundaries for mapping
+func (s *MeterService) GetDistrictGeometries(
+	ctx context.Context,
+	regions []string,
+	districts []string,
+) (*models.DistrictGeometryResponse, error) {
+
+	// Get the latest boundary update date for versioning
+	var versionDate time.Time
+	err := s.db.NewSelect().
+		ColumnExpr("MAX(updated_at) as max_date").
+		TableExpr("app.dbo_ecg_operational_regions_and_district_boundaries_10_7_25").
+		Scan(ctx, &versionDate)
 	if err != nil {
-		h.logr.Error("failed to get region geometries", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"success": false,
-			"error":   "failed to retrieve region geometries",
-		})
-		return
+		versionDate = time.Now() // Fallback to current date
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"data":    response,
+	version := versionDate.Format("2006-01-02")
+
+	// Build query for simplified geometries
+	q := s.db.NewSelect().
+		ColumnExpr("d.district_code").
+		ColumnExpr("d.district").
+		ColumnExpr("d.region").
+		ColumnExpr("ST_Y(ST_Centroid(d.the_geom)) as center_lat").
+		ColumnExpr("ST_X(ST_Centroid(d.the_geom)) as center_lng").
+		ColumnExpr(`
+            jsonb_build_object(
+                'type', 'Feature',
+                'properties', jsonb_build_object(
+                    'district_code', d.district_code,
+                    'district', d.district,
+                    'region', d.region
+                ),
+                'geometry', ST_AsGeoJSON(
+                    ST_SimplifyPreserveTopology(d.the_geom, 0.001) -- Simplify to ~111m tolerance
+                )::jsonb
+            ) as geojson
+        `).
+		TableExpr("app.dbo_ecg_operational_regions_and_district_boundaries_10_7_25 d").
+		Where("d.district IS NOT NULL").
+		Where("d.region IS NOT NULL").
+		OrderExpr("d.region, d.district")
+
+	// Apply region filter
+	if len(regions) > 0 {
+		lowerRegions := stringsToLower(regions)
+		q = q.Where("LOWER(d.region) IN (?)", bun.In(lowerRegions))
+	}
+
+	// Apply district filter
+	if len(districts) > 0 {
+
+		exact := make([]string, len(districts))
+		likes := make([]string, len(districts))
+
+		for i, d := range districts {
+			exact[i] = strings.ToLower(d)
+			likes[i] = "%" + strings.ToLower(d) + "%"
+		}
+
+		q = q.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+
+			q = q.Where("LOWER(d.district) IN (?)", bun.In(exact))
+
+			q = q.WhereGroup(" OR ", func(q *bun.SelectQuery) *bun.SelectQuery {
+				for _, l := range likes {
+					q = q.Where("LOWER(d.district) ILIKE ?", l)
+				}
+				return q
+			})
+
+			return q
+		})
+	}
+
+
+
+
+	var geometries []models.DistrictGeometry
+	if err := q.Scan(ctx, &geometries); err != nil {
+		return nil, fmt.Errorf("failed to get district geometries: %w", err)
+	}
+
+	// Round coordinates for optimization
+	for i := range geometries {
+		geometries[i].CenterLat = roundCoordinate(geometries[i].CenterLat, 6)
+		geometries[i].CenterLng = roundCoordinate(geometries[i].CenterLng, 6)
+		geometries[i].GeoJSON = simplifyGeoJSONCoordinates(geometries[i].GeoJSON, 6)
+	}
+
+	return &models.DistrictGeometryResponse{
+		Version:   version,
+		Districts: geometries,
+	}, nil
+}
+
+// GetRegionGeometries returns simplified regional boundaries by dissolving/unioning district geometries
+func (s *MeterService) GetRegionGeometries(
+	ctx context.Context,
+	regions []string,
+) (*models.RegionGeometryResponse, error) {
+
+	// Get the latest boundary update date for versioning
+	var versionDate time.Time
+	err := s.db.NewSelect().
+		ColumnExpr("MAX(updated_at) as max_date").
+		TableExpr("app.dbo_ecg_operational_regions_and_district_boundaries_10_7_25").
+		Scan(ctx, &versionDate)
+	if err != nil {
+		versionDate = time.Now() // Fallback to current date
+	}
+
+	version := versionDate.Format("2006-01-02")
+
+	// Build query for regional geometries using ST_Union to dissolve districts
+	q := s.db.NewSelect().
+		ColumnExpr("d.region_code").
+		ColumnExpr("d.region").
+		ColumnExpr("ST_Y(ST_Centroid(ST_Union(d.the_geom))) as center_lat").
+		ColumnExpr("ST_X(ST_Centroid(ST_Union(d.the_geom))) as center_lng").
+		ColumnExpr(`
+            jsonb_build_object(
+                'type', 'Feature',
+                'properties', jsonb_build_object(
+                    'region_code', d.region_code,
+                    'region', d.region
+                ),
+                'geometry', ST_AsGeoJSON(
+                    ST_SimplifyPreserveTopology(
+                        ST_Union(d.the_geom),
+                        0.001  -- Simplify to ~111m tolerance
+                    )
+                )::jsonb
+            ) as geojson
+        `).
+		TableExpr("app.dbo_ecg_operational_regions_and_district_boundaries_10_7_25 d").
+		Where("d.region IS NOT NULL").
+		GroupExpr("d.region_code").
+		GroupExpr("d.region").
+		OrderExpr("d.region")
+
+	// Apply region filter if provided
+	if len(regions) > 0 {
+		lowerRegions := stringsToLower(regions)
+		q = q.Where("LOWER(d.region) IN (?)", bun.In(lowerRegions))
+	}
+
+	var geometries []models.RegionGeometry
+	if err := q.Scan(ctx, &geometries); err != nil {
+		return nil, fmt.Errorf("failed to get region geometries: %w", err)
+	}
+
+	// Round coordinates for optimization
+	for i := range geometries {
+		geometries[i].CenterLat = roundCoordinate(geometries[i].CenterLat, 6)
+		geometries[i].CenterLng = roundCoordinate(geometries[i].CenterLng, 6)
+		geometries[i].GeoJSON = simplifyGeoJSONCoordinates(geometries[i].GeoJSON, 6)
+	}
+
+	return &models.RegionGeometryResponse{
+		Version: version,
+		Regions: geometries,
+	}, nil
+}
+
+// GetDistrictTimeseriesConsumption returns aggregated consumption by district
+func (s *MeterService) GetDistrictTimeseriesConsumption(
+	ctx context.Context,
+	params models.DistrictConsumptionParams,
+) (*models.DistrictTimeseriesResponse, error) {
+
+	// Build the query for aggregated district consumption
+	var queryBuilder strings.Builder
+	var args []interface{}
+
+	queryBuilder.WriteString(`
+        WITH district_meters AS (
+            -- Match meters to districts using multiple strategies
+            SELECT DISTINCT
+                COALESCE(
+                    d_spatial.district,
+                    d_name.district,
+                    'Unknown District'
+                ) as district,
+                COALESCE(
+                    d_spatial.region,
+                    d_name.region,
+                    m.region,
+                    'Unknown Region'
+                ) as region,
+                m.meter_number
+            FROM app.meters m
+            -- Try spatial join first
+            LEFT JOIN app.dbo_ecg d_spatial
+                ON ST_Intersects(d_spatial.the_geom, ST_SetSRID(ST_MakePoint(m.longitude, m.latitude), 4326))
+                AND m.latitude IS NOT NULL
+                AND m.longitude IS NOT NULL
+            -- Fallback to name matching
+            LEFT JOIN app.dbo_ecg d_name
+                ON LOWER(TRIM(d_name.district)) = LOWER(TRIM(m.district))
+                AND LOWER(TRIM(d_name.region)) = LOWER(TRIM(m.region))
+            WHERE m.meter_type IS NOT NULL
+    `)
+
+	// Apply meter type filter
+	if len(params.MeterType) > 0 {
+		queryBuilder.WriteString(` AND m.meter_type IN (?)`)
+		args = append(args, bun.In(stringsToUpper(params.MeterType)))
+	}
+
+	// Apply region filter (on meter table)
+	if len(params.Region) > 0 {
+		lowerRegions := stringsToLower(params.Region)
+		queryBuilder.WriteString(` AND LOWER(m.region) IN (?)`)
+		args = append(args, bun.In(lowerRegions))
+	}
+
+	// Apply district filter (on meter table)
+	if len(params.District) > 0 {
+		lowerDistricts := stringsToLower(params.District)
+		queryBuilder.WriteString(` AND LOWER(m.district) IN (?)`)
+		args = append(args, bun.In(lowerDistricts))
+	}
+
+	queryBuilder.WriteString(`
+        ),
+        consumption_data AS (
+            SELECT
+                dm.district,
+                dm.region,
+                DATE(mcd.consumption_date) as timestamp,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'import_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_import_kwh,
+                COALESCE(SUM(CASE WHEN dim.system_name = 'export_kwh' THEN mcd.consumption ELSE 0 END), 0) as total_export_kwh
+            FROM district_meters dm
+            INNER JOIN app.meter_consumption_daily mcd
+                ON dm.meter_number = mcd.meter_number
+                AND mcd.consumption_date BETWEEN ? AND ?
+            LEFT JOIN app.data_item_mapping dim
+                ON mcd.data_item_id = dim.data_item_id
+            GROUP BY dm.district, dm.region, DATE(mcd.consumption_date)
+        )
+        SELECT
+            district,
+            region,
+            timestamp,
+            total_import_kwh,
+            total_export_kwh
+        FROM consumption_data
+        ORDER BY region, district, timestamp
+    `)
+
+	// Add date parameters
+	args = append(args, params.DateFrom, params.DateTo)
+
+	q := s.db.NewRaw(queryBuilder.String(), args...)
+
+	var rawRows []struct {
+		District       string    `bun:"district"`
+		Region         string    `bun:"region"`
+		Timestamp      time.Time `bun:"timestamp"`
+		TotalImportKWh float64   `bun:"total_import_kwh"`
+		TotalExportKWh float64   `bun:"total_export_kwh"`
+	}
+
+	if err := q.Scan(ctx, &rawRows); err != nil {
+		return nil, fmt.Errorf("failed to query district timeseries: %w", err)
+	}
+
+	// Group data by district
+	districtMap := make(map[string]*models.DistrictTimeseriesData)
+
+	for _, row := range rawRows {
+		districtKey := fmt.Sprintf("%s|%s", row.District, row.Region)
+
+		if _, exists := districtMap[districtKey]; !exists {
+			districtMap[districtKey] = &models.DistrictTimeseriesData{
+				District:   row.District,
+				Region:     row.Region,
+				Timeseries: []models.DistrictTimeseriesEntry{},
+			}
+		}
+
+		entry := models.DistrictTimeseriesEntry{
+			Timestamp:         row.Timestamp,
+			TotalImportKWh:    row.TotalImportKWh,
+			TotalExportKWh:    row.TotalExportKWh,
+			NetConsumptionKWh: row.TotalImportKWh - row.TotalExportKWh,
+		}
+
+		districtMap[districtKey].Timeseries = append(
+			districtMap[districtKey].Timeseries,
+			entry,
+		)
+	}
+
+	// Convert map to slice
+	districts := make([]models.DistrictTimeseriesData, 0, len(districtMap))
+	for _, district := range districtMap {
+		districts = append(districts, *district)
+	}
+
+	// Sort by region, then district
+	sort.Slice(districts, func(i, j int) bool {
+		if districts[i].Region != districts[j].Region {
+			return districts[i].Region < districts[j].Region
+		}
+		return districts[i].District < districts[j].District
 	})
+
+	return &models.DistrictTimeseriesResponse{
+		Districts: districts,
+	}, nil
 }
 
 
-// // Add these handlers to your MeterHandler struct in handlers/meter_handler.go
+
 
 // // GetRegionMetadata returns comprehensive metadata for a specific region
-// // GET /api/v1/regions/{region}/metadata
-// func (h *MeterHandler) GetRegionMetadata(w http.ResponseWriter, r *http.Request) {
-// 	ctx := r.Context()
+// // including districts with their boundary metering points and locations
+// func (s *MeterService) GetRegionMetadata(
+// 	ctx context.Context,
+// 	region string,
+// ) (*models.RegionMetadata, error) {
 
-// 	// Get region from URL parameter
-// 	region := chi.URLParam(r, "region")
+// 	// Normalize the input region name
+// 	regionClean := strings.ToLower(strings.TrimSpace(region))
 
-// 	if region == "" {
-// 		writeJSON(w, http.StatusBadRequest, map[string]string{
-// 			"error": "region parameter is required",
-// 		})
-// 		return
+// 	query := `
+// 		WITH ecg_clean AS (
+// 			SELECT
+// 				district_name,
+// 				region,
+// 				LOWER(REGEXP_REPLACE(region, '^[0-9]+\s*-\s*|\s+Region$', '', 'gi')) AS region_clean
+// 			FROM dbo_ecg_24012026
+// 			WHERE region IS NOT NULL
+// 		),
+// 		meters_clean AS (
+// 			SELECT
+// 				meter_number,
+// 				meter_type,
+// 				station,
+// 				boundary_metering_point,
+// 				location,
+// 				district,
+// 				LOWER(TRIM(region)) AS region_clean
+// 			FROM app.meters
+// 			WHERE region IS NOT NULL AND region <> ''
+// 		),
+// 		-- Meters matched by region name
+// 		region_meters AS (
+// 			SELECT DISTINCT
+// 				m.meter_number,
+// 				m.meter_type,
+// 				m.station,
+// 				m.boundary_metering_point,
+// 				m.location,
+// 				m.district AS meter_district,
+// 				e.district_name AS ecg_district
+// 			FROM ecg_clean e
+// 			JOIN meters_clean m ON e.region_clean = m.region_clean
+// 			WHERE e.region_clean = ?
+// 		),
+// 		-- Regional boundary meters matched by boundary_metering_point LIKE pattern
+// 		regional_boundary_meters AS (
+// 			SELECT DISTINCT
+// 				meter_number,
+// 				meter_type,
+// 				station,
+// 				boundary_metering_point,
+// 				location,
+// 				district AS meter_district
+// 			FROM app.meters
+// 			WHERE meter_type = 'REGIONAL_BOUNDARY'
+// 			  AND boundary_metering_point IS NOT NULL
+// 			  AND LOWER(boundary_metering_point) LIKE '%' || ? || '%'
+// 		),
+// 		-- All meters for the region (excluding district boundary - handled separately)
+// 		all_region_meters AS (
+// 			SELECT * FROM region_meters WHERE meter_type != 'DISTRICT_BOUNDARY'
+// 			UNION
+// 			SELECT
+// 				meter_number,
+// 				meter_type,
+// 				station,
+// 				boundary_metering_point,
+// 				location,
+// 				meter_district,
+// 				NULL AS ecg_district
+// 			FROM regional_boundary_meters
+// 		)
+// 		SELECT
+// 			-- Districts from ECG (spatial boundaries)
+// 			(
+// 				SELECT jsonb_agg(DISTINCT district_name ORDER BY district_name)
+// 				FROM ecg_clean
+// 				WHERE region_clean = ?
+// 				  AND district_name IS NOT NULL
+// 			) AS ecg_districts,
+
+// 			-- Districts from meters (meter assignments)
+// 			(
+// 				SELECT jsonb_agg(DISTINCT LOWER(TRIM(meter_district)) ORDER BY LOWER(TRIM(meter_district)))
+// 				FROM all_region_meters
+// 				WHERE meter_district IS NOT NULL AND meter_district <> ''
+// 			) AS meter_districts,
+
+// 			-- Stations (for BSP, DTX, PSS, SS meters)
+// 			(
+// 				SELECT jsonb_agg(DISTINCT LOWER(TRIM(station)) ORDER BY LOWER(TRIM(station)))
+// 				FROM all_region_meters
+// 				WHERE station IS NOT NULL AND station <> ''
+// 			) AS stations,
+
+// 			-- Meter types
+// 			(
+// 				SELECT jsonb_agg(DISTINCT meter_type ORDER BY meter_type)
+// 				FROM all_region_meters
+// 				WHERE meter_type IS NOT NULL
+// 			) AS meter_types,
+
+// 			-- Regional boundary metering points with locations
+// 			(
+// 				SELECT jsonb_agg(
+// 					jsonb_build_object(
+// 						'boundary_metering_point', LOWER(TRIM(boundary_metering_point)),
+// 						'locations', locations_array
+// 					) ORDER BY LOWER(TRIM(boundary_metering_point))
+// 				)
+// 				FROM (
+// 					SELECT
+// 						boundary_metering_point,
+// 						jsonb_agg(DISTINCT LOWER(TRIM(location)) ORDER BY LOWER(TRIM(location)))
+// 							FILTER (WHERE location IS NOT NULL AND location <> '') AS locations_array
+// 					FROM regional_boundary_meters
+// 					WHERE boundary_metering_point IS NOT NULL AND boundary_metering_point <> ''
+// 					GROUP BY boundary_metering_point
+// 				) AS regional_boundaries
+// 			) AS regional_boundary_metering_points,
+
+// 			-- Total meter count (excluding district boundary for now)
+// 			(
+// 				SELECT COUNT(DISTINCT meter_number)
+// 				FROM all_region_meters
+// 			) AS total_meter_count,
+
+// 			-- Meter count by type (excluding district boundary for now)
+// 			(
+// 				SELECT jsonb_object_agg(meter_type, meter_count ORDER BY meter_type)
+// 				FROM (
+// 					SELECT meter_type, COUNT(DISTINCT meter_number) AS meter_count
+// 					FROM all_region_meters
+// 					WHERE meter_type IS NOT NULL
+// 					GROUP BY meter_type
+// 				) AS type_counts
+// 			) AS meter_count_by_type
+// 	`
+
+// 	type rawResult struct {
+// 		ECGDistricts                   json.RawMessage `bun:"ecg_districts"`
+// 		MeterDistricts                 json.RawMessage `bun:"meter_districts"`
+// 		Stations                       json.RawMessage `bun:"stations"`
+// 		MeterTypes                     json.RawMessage `bun:"meter_types"`
+// 		RegionalBoundaryMeteringPoints json.RawMessage `bun:"regional_boundary_metering_points"`
+// 		TotalMeterCount                int             `bun:"total_meter_count"`
+// 		MeterCountByType               json.RawMessage `bun:"meter_count_by_type"`
 // 	}
 
-// 	metadata, err := h.service.GetRegionMetadata(ctx, region)
+// 	var result rawResult
+// 	// Pass regionClean 3 times: region_meters WHERE, regional_boundary LIKE, ecg_districts
+// 	err := s.db.NewRaw(query, regionClean, regionClean, regionClean).Scan(ctx, &result)
 // 	if err != nil {
-// 		h.logr.Error("failed to get region metadata", zap.Error(err))
-// 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-// 			"error": "failed to retrieve region metadata",
-// 		})
-// 		return
+// 		return nil, fmt.Errorf("failed to get region metadata: %w", err)
 // 	}
 
-// 	writeJSON(w, http.StatusOK, map[string]interface{}{
-// 		"success": true,
-// 		"data":    metadata,
-// 	})
+// 	// Parse JSON arrays
+// 	var ecgDistricts, meterDistricts, stations, meterTypes []string
+// 	var regionalBoundaryPoints []models.BoundaryMeteringPointWithLocations
+// 	var meterCountByType map[string]int
+
+// 	// Helper to safely unmarshal JSON arrays
+// 	unmarshalArray := func(data json.RawMessage, target interface{}) {
+// 		if len(data) > 0 && string(data) != "null" {
+// 			json.Unmarshal(data, target)
+// 		}
+// 	}
+
+// 	unmarshalArray(result.ECGDistricts, &ecgDistricts)
+// 	unmarshalArray(result.MeterDistricts, &meterDistricts)
+// 	unmarshalArray(result.Stations, &stations)
+// 	unmarshalArray(result.MeterTypes, &meterTypes)
+// 	unmarshalArray(result.RegionalBoundaryMeteringPoints, &regionalBoundaryPoints)
+// 	unmarshalArray(result.MeterCountByType, &meterCountByType)
+
+// 	// Initialize empty slices if nil
+// 	if ecgDistricts == nil {
+// 		ecgDistricts = []string{}
+// 	}
+// 	if meterDistricts == nil {
+// 		meterDistricts = []string{}
+// 	}
+// 	if stations == nil {
+// 		stations = []string{}
+// 	}
+// 	if meterTypes == nil {
+// 		meterTypes = []string{}
+// 	}
+// 	if regionalBoundaryPoints == nil {
+// 		regionalBoundaryPoints = []models.BoundaryMeteringPointWithLocations{}
+// 	}
+// 	if meterCountByType == nil {
+// 		meterCountByType = make(map[string]int)
+// 	}
+
+// 	// Now get district-level details with their boundary metering points
+// 	districts, err := s.getDistrictsWithBoundaries(ctx, regionClean, ecgDistricts)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get district boundaries: %w", err)
+// 	}
+
+// 	// Add district boundary meter counts to totals
+// 	districtBoundaryMeterCount := 0
+// 	for _, district := range districts {
+// 		districtBoundaryMeterCount += district.MeterCount
+// 	}
+
+// 	return &models.RegionMetadata{
+// 		Region:                         region,
+// 		ECGDistricts:                   ecgDistricts,
+// 		MeterDistricts:                 meterDistricts,
+// 		Stations:                       stations,
+// 		MeterTypes:                     meterTypes,
+// 		RegionalBoundaryMeteringPoints: regionalBoundaryPoints,
+// 		Districts:                      districts,
+// 		TotalMeterCount:                result.TotalMeterCount + districtBoundaryMeterCount,
+// 		MeterCountByType:               meterCountByType,
+// 	}, nil
+// }
+
+// // getDistrictsWithBoundaries is a helper function to get district boundary details
+// func (s *MeterService) getDistrictsWithBoundaries(
+// 	ctx context.Context,
+// 	regionClean string,
+// 	districtNames []string,
+// ) ([]models.DistrictWithBoundaries, error) {
+
+// 	if len(districtNames) == 0 {
+// 		return []models.DistrictWithBoundaries{}, nil
+// 	}
+
+// 	// Build district name list for LIKE matching
+// 	var districts []models.DistrictWithBoundaries
+
+// 	for _, districtName := range districtNames {
+// 		// Clean district name: strip "District", "Municipal", "Metro" suffixes
+// 		districtClean := strings.ToLower(strings.TrimSpace(districtName))
+// 		// Remove suffixes using regex in Go
+// 		districtClean = strings.TrimSpace(
+// 			regexp.MustCompile(`(?i)\s+(district|municipal|metro)$`).ReplaceAllString(districtClean, ""),
+// 		)
+
+// 		query := `
+// 			SELECT
+// 				jsonb_agg(
+// 					jsonb_build_object(
+// 						'boundary_metering_point', LOWER(TRIM(boundary_metering_point)),
+// 						'locations', locations_array
+// 					) ORDER BY LOWER(TRIM(boundary_metering_point))
+// 				) AS boundary_points,
+// 				COUNT(DISTINCT meter_number) AS meter_count
+// 			FROM (
+// 				SELECT
+// 					boundary_metering_point,
+// 					meter_number,
+// 					jsonb_agg(DISTINCT LOWER(TRIM(location)) ORDER BY LOWER(TRIM(location)))
+// 						FILTER (WHERE location IS NOT NULL AND location <> '') AS locations_array
+// 				FROM app.meters
+// 				WHERE meter_type = 'DISTRICT_BOUNDARY'
+// 				  AND boundary_metering_point IS NOT NULL
+// 				  AND LOWER(boundary_metering_point) LIKE '%' || ? || '%'
+// 				GROUP BY boundary_metering_point, meter_number
+// 			) AS district_boundaries
+// 		`
+
+// 		var result struct {
+// 			BoundaryPoints json.RawMessage `bun:"boundary_points"`
+// 			MeterCount     int             `bun:"meter_count"`
+// 		}
+
+// 		err := s.db.NewRaw(query, districtClean).Scan(ctx, &result)
+// 		if err != nil {
+// 			continue // Skip districts with errors
+// 		}
+
+// 		var boundaryPoints []models.BoundaryMeteringPointWithLocations
+// 		if len(result.BoundaryPoints) > 0 && string(result.BoundaryPoints) != "null" {
+// 			json.Unmarshal(result.BoundaryPoints, &boundaryPoints)
+// 		}
+
+// 		if boundaryPoints == nil {
+// 			boundaryPoints = []models.BoundaryMeteringPointWithLocations{}
+// 		}
+
+// 		districts = append(districts, models.DistrictWithBoundaries{
+// 			DistrictName:           districtName,
+// 			BoundaryMeteringPoints: boundaryPoints,
+// 			MeterCount:             result.MeterCount,
+// 		})
+// 	}
+
+// 	return districts, nil
 // }
 
 // // GetAllRegionsMetadata returns metadata for all regions
-// // GET /api/v1/regions/metadata
-// func (h *MeterHandler) GetAllRegionsMetadata(w http.ResponseWriter, r *http.Request) {
-// 	ctx := r.Context()
+// func (s *MeterService) GetAllRegionsMetadata(ctx context.Context) ([]models.RegionMetadata, error) {
+// 	// First get all unique regions from ECG table
+// 	var regions []string
 
-// 	metadata, err := h.service.GetAllRegionsMetadata(ctx)
-// 	if err != nil {
-// 		h.logr.Error("failed to get all regions metadata", zap.Error(err))
-// 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-// 			"error": "failed to retrieve regions metadata",
-// 		})
-// 		return
+// 	query := `
+// 		SELECT DISTINCT LOWER(REGEXP_REPLACE(region, '^[0-9]+\s*-\s*|\s+Region$', '', 'gi')) AS region_clean
+// 		FROM dbo_ecg_24012026
+// 		WHERE region IS NOT NULL
+// 		ORDER BY region_clean
+// 	`
+
+// 	if err := s.db.NewRaw(query).Scan(ctx, &regions); err != nil {
+// 		return nil, fmt.Errorf("failed to get regions: %w", err)
 // 	}
 
-// 	writeJSON(w, http.StatusOK, map[string]interface{}{
-// 		"success": true,
-// 		"data": map[string]interface{}{
-// 			"regions": metadata,
-// 			"total":   len(metadata),
-// 		},
-// 	})
+// 	// Get metadata for each region
+// 	var results []models.RegionMetadata
+// 	for _, region := range regions {
+// 		metadata, err := s.GetRegionMetadata(ctx, region)
+// 		if err != nil {
+// 			continue // Skip regions with errors
+// 		}
+// 		results = append(results, *metadata)
+// 	}
+
+// 	return results, nil
 // }
 
-// // GetRegionDistrictMetadata returns metadata for a specific district in a region
-// // GET /api/v1/regions/{region}/districts/{district}/metadata
-// func (h *MeterHandler) GetRegionDistrictMetadata(w http.ResponseWriter, r *http.Request) {
-// 	ctx := r.Context()
+// // GetRegionDistrictMetadata returns detailed metadata for a specific district within a region
+// func (s *MeterService) GetRegionDistrictMetadata(
+// 	ctx context.Context,
+// 	region string,
+// 	district string,
+// ) (*models.DistrictMetadata, error) {
 
-// 	// Get URL parameters
-// 	region := chi.URLParam(r, "region")
-// 	district := chi.URLParam(r, "district")
+// 	regionClean := strings.ToLower(strings.TrimSpace(region))
+// 	districtClean := strings.ToLower(strings.TrimSpace(district))
+// 	// Remove suffixes: "District", "Municipal", "Metro" (case-insensitive)
+// 	districtCleanForSearch := strings.TrimSpace(
+// 		regexp.MustCompile(`(?i)\s+(district|municipal|metro)$`).ReplaceAllString(districtClean, ""),
+// 	)
 
-// 	if region == "" || district == "" {
-// 		writeJSON(w, http.StatusBadRequest, map[string]string{
-// 			"error": "both region and district parameters are required",
-// 		})
-// 		return
+// 	query := `
+// 		WITH ecg_clean AS (
+// 			SELECT
+// 				district_name,
+// 				region,
+// 				LOWER(REGEXP_REPLACE(region, '^[0-9]+\s*-\s*|\s+Region$', '', 'gi')) AS region_clean,
+// 				LOWER(TRIM(district_name)) AS district_clean
+// 			FROM dbo_ecg_24012026
+// 			WHERE region IS NOT NULL AND district_name IS NOT NULL
+// 		),
+// 		meters_clean AS (
+// 			SELECT
+// 				meter_number,
+// 				meter_type,
+// 				station,
+// 				boundary_metering_point,
+// 				voltage_kv,
+// 				location,
+// 				LOWER(TRIM(region)) AS region_clean,
+// 				LOWER(TRIM(district)) AS district_clean
+// 			FROM app.meters
+// 			WHERE region IS NOT NULL AND district IS NOT NULL
+// 		),
+// 		-- Meters matched by region AND district name
+// 		district_meters_by_name AS (
+// 			SELECT DISTINCT
+// 				m.meter_number,
+// 				m.meter_type,
+// 				m.station,
+// 				m.boundary_metering_point,
+// 				m.voltage_kv,
+// 				m.location
+// 			FROM ecg_clean e
+// 			JOIN meters_clean m
+// 			  ON e.region_clean = m.region_clean
+// 			  AND e.district_clean = m.district_clean
+// 			WHERE e.region_clean = ?
+// 			  AND e.district_clean = ?
+// 		),
+// 		-- All district meters (excluding district boundary)
+// 		all_district_meters AS (
+// 			SELECT * FROM district_meters_by_name WHERE meter_type != 'DISTRICT_BOUNDARY'
+// 		)
+// 		SELECT
+// 			-- Stations
+// 			(
+// 				SELECT jsonb_agg(DISTINCT LOWER(TRIM(station)) ORDER BY LOWER(TRIM(station)))
+// 				FROM all_district_meters
+// 				WHERE station IS NOT NULL AND station <> ''
+// 			) AS stations,
+
+// 			-- Meter types
+// 			(
+// 				SELECT jsonb_agg(DISTINCT meter_type ORDER BY meter_type)
+// 				FROM all_district_meters
+// 				WHERE meter_type IS NOT NULL
+// 			) AS meter_types,
+
+// 			-- Voltage levels
+// 			(
+// 				SELECT jsonb_agg(DISTINCT voltage_kv ORDER BY voltage_kv)
+// 				FROM all_district_meters
+// 				WHERE voltage_kv IS NOT NULL
+// 			) AS voltage_levels,
+
+// 			-- Total meter count (excluding district boundary)
+// 			(
+// 				SELECT COUNT(DISTINCT meter_number)
+// 				FROM all_district_meters
+// 			) AS total_meter_count,
+
+// 			-- Meter count by type (excluding district boundary)
+// 			(
+// 				SELECT jsonb_object_agg(meter_type, meter_count ORDER BY meter_type)
+// 				FROM (
+// 					SELECT meter_type, COUNT(DISTINCT meter_number) AS meter_count
+// 					FROM all_district_meters
+// 					WHERE meter_type IS NOT NULL
+// 					GROUP BY meter_type
+// 				) AS type_counts
+// 			) AS meter_count_by_type
+// 	`
+
+// 	type rawResult struct {
+// 		Stations         json.RawMessage `bun:"stations"`
+// 		MeterTypes       json.RawMessage `bun:"meter_types"`
+// 		VoltageLevels    json.RawMessage `bun:"voltage_levels"`
+// 		TotalMeterCount  int             `bun:"total_meter_count"`
+// 		MeterCountByType json.RawMessage `bun:"meter_count_by_type"`
 // 	}
 
-// 	metadata, err := h.service.GetRegionDistrictMetadata(ctx, region, district)
+// 	var result rawResult
+// 	err := s.db.NewRaw(query, regionClean, districtClean).Scan(ctx, &result)
 // 	if err != nil {
-// 		h.logr.Error("failed to get district metadata", zap.Error(err))
-// 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-// 			"error": "failed to retrieve district metadata",
-// 		})
-// 		return
+// 		return nil, fmt.Errorf("failed to get district metadata: %w", err)
 // 	}
 
-// 	writeJSON(w, http.StatusOK, map[string]interface{}{
-// 		"success": true,
-// 		"data":    metadata,
-// 	})
+// 	// Parse JSON arrays
+// 	var stations, meterTypes []string
+// 	var voltageLevels []float64
+// 	var meterCountByType map[string]int
+
+// 	// Helper to safely unmarshal JSON arrays
+// 	unmarshalArray := func(data json.RawMessage, target interface{}) {
+// 		if len(data) > 0 && string(data) != "null" {
+// 			json.Unmarshal(data, target)
+// 		}
+// 	}
+
+// 	unmarshalArray(result.Stations, &stations)
+// 	unmarshalArray(result.MeterTypes, &meterTypes)
+// 	unmarshalArray(result.VoltageLevels, &voltageLevels)
+// 	unmarshalArray(result.MeterCountByType, &meterCountByType)
+
+// 	// Initialize empty slices if nil
+// 	if stations == nil {
+// 		stations = []string{}
+// 	}
+// 	if meterTypes == nil {
+// 		meterTypes = []string{}
+// 	}
+// 	if voltageLevels == nil {
+// 		voltageLevels = []float64{}
+// 	}
+// 	if meterCountByType == nil {
+// 		meterCountByType = make(map[string]int)
+// 	}
+
+// 	// Get district boundary metering points with locations
+// 	boundaryQuery := `
+// 		SELECT
+// 			jsonb_agg(
+// 				jsonb_build_object(
+// 					'boundary_metering_point', LOWER(TRIM(boundary_metering_point)),
+// 					'locations', locations_array
+// 				) ORDER BY LOWER(TRIM(boundary_metering_point))
+// 			) AS boundary_points,
+// 			COUNT(DISTINCT meter_number) AS meter_count
+// 		FROM (
+// 			SELECT
+// 				boundary_metering_point,
+// 				meter_number,
+// 				jsonb_agg(DISTINCT LOWER(TRIM(location)) ORDER BY LOWER(TRIM(location)))
+// 					FILTER (WHERE location IS NOT NULL AND location <> '') AS locations_array
+// 			FROM app.meters
+// 			WHERE meter_type = 'DISTRICT_BOUNDARY'
+// 			  AND boundary_metering_point IS NOT NULL
+// 			  AND LOWER(boundary_metering_point) LIKE '%' || ? || '%'
+// 			GROUP BY boundary_metering_point, meter_number
+// 		) AS district_boundaries
+// 	`
+
+// 	var boundaryResult struct {
+// 		BoundaryPoints json.RawMessage `bun:"boundary_points"`
+// 		MeterCount     int             `bun:"meter_count"`
+// 	}
+
+// 	err = s.db.NewRaw(boundaryQuery, districtCleanForSearch).Scan(ctx, &boundaryResult)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get boundary points: %w", err)
+// 	}
+
+// 	var boundaryPoints []models.BoundaryMeteringPointWithLocations
+// 	if len(boundaryResult.BoundaryPoints) > 0 && string(boundaryResult.BoundaryPoints) != "null" {
+// 		json.Unmarshal(boundaryResult.BoundaryPoints, &boundaryPoints)
+// 	}
+
+// 	if boundaryPoints == nil {
+// 		boundaryPoints = []models.BoundaryMeteringPointWithLocations{}
+// 	}
+
+// 	return &models.DistrictMetadata{
+// 		Region:                 region,
+// 		District:               district,
+// 		Stations:               stations,
+// 		MeterTypes:             meterTypes,
+// 		BoundaryMeteringPoints: boundaryPoints,
+// 		VoltageLevels:          voltageLevels,
+// 		TotalMeterCount:        result.TotalMeterCount + boundaryResult.MeterCount,
+// 		MeterCountByType:       meterCountByType,
+// 	}, nil
 // }
 
-// Example route registration in your router setup:
-// r.Get("/regions/metadata", meterHandler.GetAllRegionsMetadata)
-// r.Get("/regions/{region}/metadata", meterHandler.GetRegionMetadata)
-// r.Get("/regions/{region}/districts/{district}/metadata", meterHandler.GetRegionDistrictMetadata)
 
 
-// --- helper functions ---
 
-func splitCSV(input string) []string {
-	if input == "" {
-		return nil
-	}
-	parts := strings.Split(input, ",")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-	}
-	return parts
+
+// Helper function to round coordinates
+func roundCoordinate(value float64, precision int) float64 {
+	multiplier := math.Pow(10, float64(precision))
+	return math.Round(value*multiplier) / multiplier
 }
 
-func parseCSVFloat(input string) []float64 {
-	if input == "" {
-		return nil
+// Helper function to simplify GeoJSON coordinates
+func simplifyGeoJSONCoordinates(geojson json.RawMessage, precision int) json.RawMessage {
+	type Geometry struct {
+		Type        string        `json:"type"`
+		Coordinates [][][]float64 `json:"coordinates"`
 	}
-	parts := strings.Split(input, ",")
-	var result []float64
-	for _, p := range parts {
-		if f, err := strconv.ParseFloat(strings.TrimSpace(p), 64); err == nil {
-			result = append(result, f)
+	type Feature struct {
+		Type       string                 `json:"type"`
+		Properties map[string]interface{} `json:"properties"`
+		Geometry   Geometry               `json:"geometry"`
+	}
+
+	var feature Feature
+	if err := json.Unmarshal(geojson, &feature); err != nil {
+		return geojson // Return original if parsing fails
+	}
+
+	// ONLY round coordinates - let PostGIS handle simplification
+	for i := range feature.Geometry.Coordinates {
+		for j := range feature.Geometry.Coordinates[i] {
+			for k := range feature.Geometry.Coordinates[i][j] {
+				feature.Geometry.Coordinates[i][j][k] = roundCoordinate(
+					feature.Geometry.Coordinates[i][j][k],
+					precision,
+				)
+			}
 		}
 	}
-	return result
+
+	// Remove this entire block that was causing chunky zigzags:
+	// ❌ if len(feature.Geometry.Coordinates) > 0 && len(feature.Geometry.Coordinates[0]) > 100 {
+	// ❌     n := len(feature.Geometry.Coordinates[0]) / 80
+	// ❌     ... all the naive point-skipping logic ...
+	// ❌ }
+
+	simplifiedJSON, _ := json.Marshal(feature)
+	return simplifiedJSON
 }
 
-func parseBool(input string) bool {
-	input = strings.ToLower(strings.TrimSpace(input))
-	return input == "1" || input == "true"
+func pointsEqual(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
+///HELPER
+
+func buildReadingFilters(params models.ReadingFilterParams) []Filter {
+	filters := []Filter{}
+
+	// Date range (required)
+	filters = append(filters, Filter{
+		Query: "mcd.consumption_date BETWEEN ? AND ?",
+		Args:  []interface{}{params.DateFrom, params.DateTo},
+	})
+
+	// Meter numbers (now slice)
+	if len(params.MeterNumber) > 0 {
+		filters = append(filters, Filter{
+			Query: "mcd.meter_number IN (?)",
+			Args:  []interface{}{bun.In(params.MeterNumber)},
+		})
+	}
+
+	// Region (lowercase)
+	if len(params.Regions) > 0 {
+		filters = append(filters, Filter{
+			Query: "lower(mtr.region) IN (?)",
+			Args:  []interface{}{bun.In(stringsToLower(params.Regions))},
+		})
+	}
+
+	// District (lowercase)
+	if len(params.Districts) > 0 {
+		filters = append(filters, Filter{
+			Query: "lower(mtr.district) IN (?)",
+			Args:  []interface{}{bun.In(stringsToLower(params.Districts))},
+		})
+	}
+
+	// Station (lowercase)
+	if len(params.Stations) > 0 {
+		filters = append(filters, Filter{
+			Query: "lower(mtr.station) IN (?)",
+			Args:  []interface{}{bun.In(stringsToLower(params.Stations))},
+		})
+	}
+
+	// Location (lowercase)
+	if len(params.Locations) > 0 {
+		filters = append(filters, Filter{
+			Query: "lower(mtr.location) IN (?)",
+			Args:  []interface{}{bun.In(stringsToLower(params.Locations))},
+		})
+	}
+
+	// Boundary metering point (lowercase)
+	if len(params.BoundaryMeteringPoint) > 0 {
+		filters = append(filters, Filter{
+			Query: "lower(mtr.boundary_metering_point) IN (?)",
+			Args:  []interface{}{bun.In(stringsToLower(params.BoundaryMeteringPoint))},
+		})
+	}
+
+	// Meter type (uppercase)
+	if len(params.MeterTypes) > 0 {
+		filters = append(filters, Filter{
+			Query: "mtr.meter_type IN (?)",
+			Args:  []interface{}{bun.In(stringsToUpper(params.MeterTypes))},
+		})
+	}
+
+	// Voltage (numeric)
+	if len(params.Voltages) > 0 {
+		filters = append(filters, Filter{
+			Query: "mtr.voltage_kv IN (?)",
+			Args:  []interface{}{bun.In(params.Voltages)},
+		})
+	}
+
+	return filters
+}
+
+func stringsToLower(arr []string) []string {
+	out := make([]string, len(arr))
+	for i, v := range arr {
+		out[i] = strings.ToLower(v)
+	}
+	return out
+}
+
+func stringsToUpper(arr []string) []string {
+	out := make([]string, len(arr))
+	for i, v := range arr {
+		out[i] = strings.ToUpper(v)
+	}
+	return out
+}

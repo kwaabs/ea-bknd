@@ -8,9 +8,10 @@ import (
 	mdlwr "bknd-1/internal/middleware"
 	"bknd-1/internal/services"
 
+	"net/http"
+
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
-	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/uptrace/bun"
@@ -48,6 +49,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 	feedbackSvc := services.NewFeedbackService(db)
 	meterMetricsSvc := services.NewMeterMetricsService(db)
 	serviceAreaSvc := services.NewServiceAreaService(db) // ✅ NEW
+	commentSvc := services.NewCommentService(db, logr.Logger)
 
 	// create the auth middleware instance (pass dependencies)
 	authMW := mdlwr.NewAuthMiddleware(cfg.JWTPublicKeyPath, authSvc, logr.Logger)
@@ -58,6 +60,8 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 	meterMetricsHandler := handlers.NewMeterMetricsHandler(meterMetricsSvc, logr.Logger)
 	serviceAreaHandler := handlers.NewServiceAreaHandler(serviceAreaSvc, logr.Logger) // ✅ NEW
 	feederHandler := handlers.NewFeederHandler(feederService, logr.Logger)
+
+	commentH := handlers.NewCommentHandler(commentSvc, logr.Logger)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -141,11 +145,6 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 			// 	r.Get("/{region}/districts/{district}/metadata", meterHandler.GetRegionDistrictMetadata)
 			// })
 
-
-
-
-
-
 			// ✅ CONSUMPTION ENDPOINTS - ENHANCED
 			r.Route("/consumption", func(r chi.Router) {
 				// NEW - Phase 2
@@ -217,19 +216,33 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 
 		r.Route("/feedback", func(r chi.Router) {
 			r.Post("/", feedbackHandler.CreateFeedback)
-
 			r.Get("/", feedbackHandler.GetAllFeedback)
 			r.Get("/user/{email}", feedbackHandler.GetFeedbackByEmail)
-
-			// Get all feedback (paginated)
-			r.Get("/feedback/{id}", feedbackHandler.GetFeedbackByID)               // Get single feedback with replies
-			r.Patch("/feedback/{id}/status", feedbackHandler.UpdateFeedbackStatus) // Update status
+			r.Get("/{id}", feedbackHandler.GetFeedbackByID)
+			r.Patch("/{id}/status", feedbackHandler.UpdateFeedbackStatus)
+			r.Delete("/{id}", feedbackHandler.DeleteFeedback) // Admin only - add middleware
 		})
 
 		r.Route("/energy-balance", func(r chi.Router) {
 			// In your router setup, add these routes:
 			r.Get("/regional", meterHandler.GetRegionalEnergyBalance)
 			r.Get("/regional/summary", meterHandler.GetRegionalEnergyBalanceSummary)
+		})
+
+		r.Route("/comments", func(r chi.Router) {
+
+			// Comments
+			r.Get("/", commentH.ListComments)
+			r.Post("/", commentH.CreateComment)
+			r.Get("/{id}/replies", commentH.ListReplies)
+			r.Post("/{id}/replies", commentH.CreateReply)
+			r.Patch("/{id}", commentH.EditComment)
+			r.Delete("/{id}", commentH.DeleteComment)
+			r.Post("/{id}/reactions", commentH.ToggleReaction)
+			r.Patch("/{id}/resolve", commentH.ResolveComment)
+
+			// Users
+			r.Get("/users/mentionable", commentH.GetMentionableUsers)
 		})
 
 		// ✅ NEW: Service Areas routes

@@ -27,9 +27,9 @@ func (s *ServiceAreaService) GetServiceAreas(
 	q := s.db.NewSelect().
 		Column("id").
 		Column("region").
-		Column("district").
-		ColumnExpr("ST_AsGeoJSON(the_geom) as geojson").
-		TableExpr("app.dbo_ecg AS sa").
+		Column("the_geom").
+		Column("the_geojson").
+		TableExpr("app.dissolved_regions AS dr").
 		Where("the_geom IS NOT NULL") // Only return areas with valid geometry
 
 	// Apply filters

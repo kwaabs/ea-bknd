@@ -142,6 +142,7 @@ type DailyConsumptionResults struct {
 	FeederPanelName       string    `bun:"feeder_panel_name" json:"feeder_panel_name,omitempty"`
 	IC_OG                 string    `bun:"ic_og" json:"ic_og,omitempty"`
 	VoltageKv             string    `bun:"voltage_kv" json:"voltage_kv,omitempty"`
+	MultiplyFactor        string    `bun:"multiply_factor" json:"multiply_factor,omitempty"`
 	MeterType             string    `bun:"meter_type" json:"meter_type,omitempty"`
 	BoundaryMeteringPoint string    `bun:"boundary_metering_point" json:"boundary_metering_point,omitempty"`
 }
@@ -557,12 +558,12 @@ type RegionalMapResponse struct {
 
 // DistrictGeometry represents simplified district boundary with center point
 type DistrictGeometry struct {
-	DistrictCode  string          `bun:"district_code" json:"district_code"`
-	District  string          `bun:"district" json:"district"`
-	Region    string          `bun:"region" json:"region"`
-	CenterLat float64         `bun:"center_lat" json:"center_lat"`
-	CenterLng float64         `bun:"center_lng" json:"center_lng"`
-	GeoJSON   json.RawMessage `bun:"geojson" json:"geojson"`
+	DistrictCode string          `bun:"district_code" json:"district_code"`
+	District     string          `bun:"district" json:"district"`
+	Region       string          `bun:"region" json:"region"`
+	CenterLat    float64         `bun:"center_lat" json:"center_lat"`
+	CenterLng    float64         `bun:"center_lng" json:"center_lng"`
+	GeoJSON      json.RawMessage `bun:"geojson" json:"geojson"`
 }
 
 // DistrictGeometryResponse represents the geometry API response
@@ -721,11 +722,11 @@ type RegionFlowDetail struct {
 
 // RegionGeometry represents simplified regional boundary with center point
 type RegionGeometry struct {
-	RegionCode    string      `bun:"region_code" json:"region_code,omitempty"`
-	Region    string          `bun:"region" json:"region"`
-	CenterLat float64         `bun:"center_lat" json:"center_lat"`
-	CenterLng float64         `bun:"center_lng" json:"center_lng"`
-	GeoJSON   json.RawMessage `bun:"geojson" json:"geojson"`
+	RegionCode string          `bun:"region_code" json:"region_code,omitempty"`
+	Region     string          `bun:"region" json:"region"`
+	CenterLat  float64         `bun:"center_lat" json:"center_lat"`
+	CenterLng  float64         `bun:"center_lng" json:"center_lng"`
+	GeoJSON    json.RawMessage `bun:"geojson" json:"geojson"`
 }
 
 // RegionGeometryResponse represents the geometry API response
@@ -733,9 +734,6 @@ type RegionGeometryResponse struct {
 	Version string           `json:"version"`
 	Regions []RegionGeometry `json:"regions"`
 }
-
-
-
 
 // // BoundaryMeteringPointWithLocations represents a boundary metering point and its associated locations
 // type BoundaryMeteringPointWithLocations struct {

@@ -45,7 +45,7 @@ type tokenResp struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
 	ExpiresAt    time.Time `json:"access_expires_at"`
-	User         *UserInfo `json:"user"` // Add this
+	User         *UserInfo `json:"user"`
 }
 
 type UserInfo struct {
@@ -56,8 +56,7 @@ type UserInfo struct {
 	Roles    []string `json:"roles"`
 }
 
-// Local login
-// Local login - Updated to match LoginLDAP signature
+// LoginLocal performs local authentication and returns tokens + user info
 func (s *AuthService) LoginLocal(ctx context.Context, email, password, deviceInfo string) (*auth.TokenPair, *UserInfo, error) {
 	var u model.User
 	err := s.db.NewSelect().Model(&u).Where("email = ?", email).Scan(ctx)
@@ -74,11 +73,14 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password, deviceInf
 		return nil, nil, fmt.Errorf("invalid credentials")
 	}
 
-	// update last_login
+	// FIX: use Set() to update only last_login_at, avoids zeroing other columns
 	now := time.Now().UTC()
-	_, _ = s.db.NewUpdate().Model(&model.User{LastLoginAt: &now}).Where("id = ?", u.ID).Exec(ctx)
+	_, _ = s.db.NewUpdate().
+		TableExpr("app.users").
+		Set("last_login_at = ?", now).
+		Where("id = ?", u.ID).
+		Exec(ctx)
 
-	// issue tokens and store refresh
 	pair, err := s.jwt.GenerateTokenPair(u.ID.String(), s.cfg.AccessTokenTTL, s.cfg.RefreshTokenTTL, u.TokenVersion, "local", u.Roles)
 	if err != nil {
 		return nil, nil, err
@@ -88,7 +90,6 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password, deviceInf
 		return nil, nil, err
 	}
 
-	// Build UserInfo response
 	userInfo := &UserInfo{
 		ID:       u.ID.String(),
 		Email:    u.Email,
@@ -99,8 +100,6 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password, deviceInf
 
 	return pair, userInfo, nil
 }
-
-// LDAP login: search then bind (per your request)
 
 // LoginLDAP performs LDAP authentication and returns tokens + user info
 func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceInfo string) (*auth.TokenPair, *UserInfo, error) {
@@ -129,7 +128,6 @@ func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceI
 		}
 	}()
 
-	// Set connection timeout
 	l.SetTimeout(30 * time.Second)
 
 	// Form DN: username@ECGGH.COM
@@ -192,6 +190,8 @@ func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceI
 	if lastName == "" {
 		lastName = sn
 	}
+	_ = firstName
+	_ = lastName
 
 	fullName := displayName
 	if fullName == "" {
@@ -211,7 +211,7 @@ func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceI
 	var u model.User
 	err = s.db.NewSelect().
 		Model(&u).
-		Column("id", "email", "provider", "name", "roles", "token_version", "created_at"). // Only needed columns
+		Column("id", "email", "provider", "name", "roles", "token_version", "created_at").
 		Where("email = ?", mail).
 		Scan(ctx)
 
@@ -222,7 +222,7 @@ func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceI
 				Email:    mail,
 				Provider: "ldap",
 				Name:     fullName,
-				Roles:    []string{"user"}, // Default role
+				Roles:    []string{"user"},
 			}
 			_, err = s.db.NewInsert().Model(&u).Exec(ctx)
 			if err != nil {
@@ -237,17 +237,19 @@ func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceI
 	} else {
 		// Update provider if needed
 		if u.Provider != "ldap" {
-			_, _ = s.db.NewUpdate().Model(&u).
+			_, _ = s.db.NewUpdate().
+				TableExpr("app.users").
 				Set("provider = ?", "ldap").
 				Where("id = ?", u.ID).
 				Exec(ctx)
 		}
 	}
 
-	// Update last login
+	// FIX: use Set() to update only last_login_at, avoids zeroing other columns
 	now := time.Now().UTC()
 	_, _ = s.db.NewUpdate().
-		Model(&model.User{LastLoginAt: &now}).
+		TableExpr("app.users").
+		Set("last_login_at = ?", now).
 		Where("id = ?", u.ID).
 		Exec(ctx)
 
@@ -271,7 +273,6 @@ func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceI
 		return nil, nil, fmt.Errorf("failed to store session")
 	}
 
-	// Build response
 	userInfo := &UserInfo{
 		ID:       u.ID.String(),
 		Email:    mail,
@@ -288,29 +289,38 @@ func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceI
 	return pair, userInfo, nil
 }
 
-// storeRefreshToken stores refresh token hashed and enforces 2 sessions per user
+// storeRefreshToken stores a hashed refresh token and enforces max 2 sessions per user
 func (s *AuthService) storeRefreshToken(ctx context.Context, userID uuid.UUID, refreshToken string, expiresAt time.Time, jti string, deviceInfo string) error {
-	// 1) cleanup expired tokens for user
-	_, _ = s.db.NewDelete().Model((*model.RefreshToken)(nil)).Where("user_id = ? AND expires_at < now()", userID).Exec(ctx)
+	// 1) Cleanup expired tokens for this user
+	_, _ = s.db.NewDelete().
+		Model((*model.RefreshToken)(nil)).
+		Where("user_id = ? AND expires_at < now()", userID).
+		Exec(ctx)
 
-	// 2) enforce max 2 active sessions (non-revoked & not expired)
+	// 2) Enforce max 2 active sessions
 	var count int
-	err := s.db.NewSelect().ColumnExpr("count(*)").Table("refresh_tokens").Where("user_id = ? AND revoked = false AND expires_at > now()", userID).Scan(ctx, &count)
+	err := s.db.NewSelect().
+		ColumnExpr("count(*)").
+		Table("app.refresh_tokens").
+		Where("user_id = ? AND revoked = false AND expires_at > now()", userID).
+		Scan(ctx, &count)
+
 	if err == nil && count >= 2 {
-		// delete oldest non-revoked token(s) to make room
-		// remove oldest until count < 2
-		toRemove := count - 1 // leave 1 plus new => 2
+		toRemove := count - 1
 		if toRemove <= 0 {
 			toRemove = 1
 		}
-		// delete by created_at order
-		_, _ = s.db.NewDelete().Model((*model.RefreshToken)(nil)).
-			Where("id IN (SELECT id FROM refresh_tokens WHERE user_id = ? AND revoked = false AND expires_at > now() ORDER BY created_at ASC LIMIT ?)", userID, toRemove).
+		_, _ = s.db.NewDelete().
+			Model((*model.RefreshToken)(nil)).
+			Where("id IN (SELECT id FROM app.refresh_tokens WHERE user_id = ? AND revoked = false AND expires_at > now() ORDER BY created_at ASC LIMIT ?)", userID, toRemove).
 			Exec(ctx)
 	}
 
 	hashed := auth.HashToken(refreshToken)
+
+	// FIX: explicitly set ID with uuid.New() to avoid null constraint violation
 	rt := model.RefreshToken{
+		ID:         uuid.New(),
 		UserID:     userID,
 		JTI:        jti,
 		TokenHash:  hashed,
@@ -319,18 +329,17 @@ func (s *AuthService) storeRefreshToken(ctx context.Context, userID uuid.UUID, r
 		CreatedAt:  time.Now().UTC(),
 		ExpiresAt:  expiresAt,
 	}
+
 	_, err = s.db.NewInsert().Model(&rt).Exec(ctx)
 	return err
 }
 
-// Refresh: takes refresh token string, verifies JWT, finds DB record by JTI & hash, rotates
+// Refresh verifies a refresh token, rotates it, and returns a new token pair
 func (s *AuthService) Refresh(ctx context.Context, refreshToken string, deviceInfo string) (*auth.TokenPair, error) {
-	// verify JWT signature & claims
 	claims, err := s.jwt.VerifyToken(refreshToken)
 	if err != nil {
 		return nil, fmt.Errorf("invalid refresh token: %w", err)
 	}
-	// ensure typ == refresh
 	if claims["typ"] != string(auth.RefreshToken) {
 		return nil, fmt.Errorf("not a refresh token")
 	}
@@ -342,24 +351,30 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken string, deviceIn
 	if !ok {
 		return nil, fmt.Errorf("invalid token jti")
 	}
-	// find refresh token record by user_id and jti and token_hash
+
 	hashed := auth.HashToken(refreshToken)
 
 	var rt model.RefreshToken
-	err = s.db.NewSelect().Model(&rt).Where("jti = ? AND token_hash = ? AND revoked = false AND expires_at > now()", jti, hashed).Scan(ctx)
+	err = s.db.NewSelect().
+		Model(&rt).
+		Where("jti = ? AND token_hash = ? AND revoked = false AND expires_at > now()", jti, hashed).
+		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("refresh token not found or revoked")
 	}
 
-	// get user
 	var u model.User
 	err = s.db.NewSelect().Model(&u).Where("id = ?", rt.UserID).Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
 
-	// rotate: revoke old token (mark revoked) and create new token pair & store new refresh token
-	_, _ = s.db.NewUpdate().Model(&model.RefreshToken{Revoked: true}).Where("id = ?", rt.ID).Exec(ctx)
+	// Revoke old token
+	_, _ = s.db.NewUpdate().
+		TableExpr("app.refresh_tokens").
+		Set("revoked = true").
+		Where("id = ?", rt.ID).
+		Exec(ctx)
 
 	pair, err := s.jwt.GenerateTokenPair(u.ID.String(), s.cfg.AccessTokenTTL, s.cfg.RefreshTokenTTL, u.TokenVersion, "refresh", u.Roles)
 	if err != nil {
@@ -372,7 +387,7 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken string, deviceIn
 	return pair, nil
 }
 
-// Logout: revoke a refresh token by JTI or token string
+// Logout revokes a refresh token by JTI
 func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 	claims, err := s.jwt.VerifyToken(refreshToken)
 	if err != nil {
@@ -382,8 +397,11 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 	if !ok {
 		return fmt.Errorf("invalid jti")
 	}
-	// mark revoked
-	_, err = s.db.NewUpdate().Model(&model.RefreshToken{Revoked: true}).Where("jti = ?", jti).Exec(ctx)
+	_, err = s.db.NewUpdate().
+		TableExpr("app.refresh_tokens").
+		Set("revoked = true").
+		Where("jti = ?", jti).
+		Exec(ctx)
 	return err
 }
 

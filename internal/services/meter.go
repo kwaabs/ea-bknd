@@ -416,6 +416,7 @@ func (s *MeterService) GetDailyConsumption(
 		Column("mtr.station").
 		Column("mtr.meter_type").
 		Column("mtr.location").
+		Column("mtr.multiply_factor").
 		Column("mtr.voltage_kv").
 		Column("mcd.day_start_reading").
 		Column("mcd.day_end_reading").
@@ -435,6 +436,7 @@ func (s *MeterService) GetDailyConsumption(
 		Group("mtr.region").
 		Group("mtr.district").
 		Group("mtr.meter_type").
+		Group("mtr.multiply_factor").
 		Group("mtr.station").
 		Group("mtr.voltage_kv").
 		Group("mtr.location").
@@ -465,6 +467,7 @@ func (s *MeterService) GetRegionalBoundaryDailyConsumption(
 		Column("mtr.station").
 		Column("mtr.meter_type").
 		Column("mtr.voltage_kv").
+		Column("mtr.multiply_factor").
 		Column("mtr.boundary_metering_point").
 		Column("mtr.location").
 		Column("mcd.day_start_reading").
@@ -493,6 +496,7 @@ func (s *MeterService) GetRegionalBoundaryDailyConsumption(
 		Group("mtr.meter_type").
 		Group("mtr.station").
 		Group("mtr.voltage_kv").
+		Group("mtr.multiply_factor").
 		Group("mtr.boundary_metering_point").
 		Group("mtr.location").
 		Group("dim.system_name").
@@ -524,6 +528,7 @@ func (s *MeterService) GetDistrictBoundaryDailyConsumption(
 		Column("mtr.station").
 		Column("mtr.meter_type").
 		Column("mtr.voltage_kv").
+		Column("mtr.multiply_factor").
 		Column("mcd.day_start_reading").
 		Column("mcd.day_end_reading").
 		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
@@ -550,6 +555,7 @@ func (s *MeterService) GetDistrictBoundaryDailyConsumption(
 		Group("mtr.meter_type").
 		Group("mtr.station").
 		Group("mtr.voltage_kv").
+		Group("mtr.multiply_factor").
 		Group("mtr.boundary_metering_point").
 		Group("mtr.location").
 		Group("dim.system_name").
@@ -581,6 +587,7 @@ func (s *MeterService) GetBSPDailyConsumption(
 		Column("mtr.feeder_panel_name").
 		ColumnExpr("mtr.ic_og AS ic_og").
 		Column("mtr.voltage_kv").
+		Column("mtr.multiply_factor").
 		Column("mcd.day_start_reading").
 		Column("mcd.day_end_reading").
 		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
@@ -605,6 +612,7 @@ func (s *MeterService) GetBSPDailyConsumption(
 		Group("mtr.region").
 		Group("mtr.district").
 		Group("mtr.meter_type").
+		Group("mtr.multiply_factor").
 		Group("mtr.station").
 		Group("mtr.feeder_panel_name").
 		Group("mtr.ic_og").
@@ -637,6 +645,7 @@ func (s *MeterService) GetDTXDailyConsumption(
 		Column("mtr.meter_type").
 		Column("mtr.feeder_panel_name").
 		Column("mtr.voltage_kv").
+		Column("mtr.multiply_factor").
 		Column("mcd.day_start_reading").
 		Column("mcd.day_end_reading").
 		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
@@ -662,6 +671,7 @@ func (s *MeterService) GetDTXDailyConsumption(
 		Group("mtr.district").
 		Group("mtr.meter_type").
 		Group("mtr.station").
+		Group("mtr.multiply_factor").
 		Group("mtr.feeder_panel_name").
 		Group("mtr.voltage_kv").
 		Group("dim.system_name").
@@ -1271,6 +1281,7 @@ func (s *MeterService) GetFeederDailyConsumption(
 		Column("mtr.meter_type").
 		Column("mtr.feeder_panel_name").
 		Column("mtr.ic_og").
+		Column("mtr.multiply_factor").
 		Column("mtr.voltage_kv").
 		Column("mcd.day_start_reading").
 		Column("mcd.day_end_reading").
@@ -1299,6 +1310,7 @@ func (s *MeterService) GetFeederDailyConsumption(
 		Group("mtr.station").
 		Group("mtr.feeder_panel_name").
 		Group("mtr.ic_og").
+		Group("mtr.multiply_factor").
 		Group("mtr.voltage_kv").
 		Group("dim.system_name").
 		Group("mcd.day_start_reading").
@@ -1330,6 +1342,7 @@ func (s *MeterService) GetPSSDailyConsumption(
 		Column("mtr.feeder_panel_name").
 		Column("mtr.ic_og").
 		Column("mtr.voltage_kv").
+		Column("mtr.multiply_factor").
 		Column("mcd.day_start_reading").
 		Column("mcd.day_end_reading").
 		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
@@ -1355,6 +1368,7 @@ func (s *MeterService) GetPSSDailyConsumption(
 		Group("mtr.district").
 		Group("mtr.meter_type").
 		Group("mtr.station").
+		Group("mtr.multiply_factor").
 		Group("mtr.feeder_panel_name").
 		Group("mtr.ic_og").
 		Group("mtr.voltage_kv").
@@ -1487,6 +1501,7 @@ func (s *MeterService) GetSSDailyConsumption(
 		Column("mtr.meter_type").
 		Column("mtr.feeder_panel_name").
 		Column("mtr.voltage_kv").
+		Column("mtr.multiply_factor").
 		Column("mcd.day_start_reading").
 		Column("mcd.day_end_reading").
 		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
@@ -1512,6 +1527,7 @@ func (s *MeterService) GetSSDailyConsumption(
 		Group("mtr.district").
 		Group("mtr.meter_type").
 		Group("mtr.station").
+		Group("mtr.multiply_factor").
 		Group("mtr.feeder_panel_name").
 		Group("mtr.voltage_kv").
 		Group("dim.system_name").
@@ -5253,11 +5269,17 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 		})
 	}
 
-	// Boundary metering point (lowercase)
+	// Boundary metering point (partial match - supports "Accra West" matching "Accra West/Tema")
 	if len(params.BoundaryMeteringPoint) > 0 {
+		conditions := make([]string, len(params.BoundaryMeteringPoint))
+		args := make([]interface{}, len(params.BoundaryMeteringPoint))
+		for i, bmp := range params.BoundaryMeteringPoint {
+			conditions[i] = "mtr.boundary_metering_point ILIKE ?"
+			args[i] = "%" + strings.TrimSpace(bmp) + "%"
+		}
 		filters = append(filters, Filter{
-			Query: "lower(mtr.boundary_metering_point) IN (?)",
-			Args:  []interface{}{bun.In(stringsToLower(params.BoundaryMeteringPoint))},
+			Query: "(" + strings.Join(conditions, " OR ") + ")",
+			Args:  args,
 		})
 	}
 

@@ -170,6 +170,9 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 				r.Get("/daily/dtx", meterHandler.GetDTXDailyConsumption)
 				r.Get("/aggregate/dtx", meterHandler.GetDTXAggregatedConsumption)
 				r.Get("/top-bottom-consumers", meterHandler.GetTopBottomConsumers)
+				r.Get("/daily/express-feeder", meterHandler.GetExpressFeederDailyConsumption)
+
+				r.Get("/aggregate/express-feeder", meterHandler.GetExpressFeederAggregatedConsumption)
 			})
 
 			// ✅ NEW: Spatial service area routes

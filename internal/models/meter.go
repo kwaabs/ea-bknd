@@ -158,6 +158,11 @@ type ReadingFilterParams struct {
 	MeterTypes            []string
 	DateFrom              time.Time
 	DateTo                time.Time
+	// Feeder secondary filters
+	SendingRegions     []string
+	SendingDistricts   []string
+	ReceivingRegions   []string
+	ReceivingDistricts []string
 }
 
 type AggregatedConsumptionResult struct {
@@ -772,3 +777,94 @@ type RegionGeometryResponse struct {
 // 	TotalMeterCount        int                                   `json:"total_meter_count"`
 // 	MeterCountByType       map[string]int                        `json:"meter_count_by_type"`
 // }
+
+type ExpressFeederDailyConsumptionResult struct {
+	ConsumptionDate time.Time `bun:"consumption_date" json:"consumption_date"`
+	MeterNumber     string    `bun:"meter_number" json:"meter_number"`
+	DayStartReading float64   `bun:"day_start_reading" json:"day_start_reading"`
+	DayEndReading   float64   `bun:"day_end_reading" json:"day_end_reading"`
+	ConsumedEnergy  float64   `bun:"consumed_energy" json:"consumed_energy"`
+	SystemName      string    `bun:"system_name" json:"system_name"`
+	MeterType       string    `bun:"meter_type" json:"meter_type,omitempty"`
+	MultiplyFactor  string    `bun:"multiply_factor" json:"multiply_factor,omitempty"`
+	VoltageKv       string    `bun:"voltage_kv" json:"voltage_kv,omitempty"`
+	// Sending end
+	SapVersion           string `bun:"sap_version" json:"sap_version,omitempty"`
+	FeederName           string `bun:"feeder_name" json:"feeder_name,omitempty"`
+	SendingStation       string `bun:"sending_station" json:"sending_station,omitempty"`
+	SendingTypeOfStation string `bun:"sending_type_of_station" json:"sending_type_of_station,omitempty"`
+	SendingCode          string `bun:"sending_code" json:"sending_code,omitempty"`
+	SendingRegion        string `bun:"sending_region" json:"sending_region,omitempty"`
+	SendingDistrict      string `bun:"sending_district" json:"sending_district,omitempty"`
+	// Receiving end
+	ReceivingStation       string `bun:"receiving_station" json:"receiving_station,omitempty"`
+	ReceivingTypeOfStation string `bun:"receiving_type_of_station" json:"receiving_type_of_station,omitempty"`
+	ReceivingCode          string `bun:"receiving_code" json:"receiving_code,omitempty"`
+	ReceivingRegion        string `bun:"receiving_region" json:"receiving_region,omitempty"`
+	ReceivingDistrict      string `bun:"receiving_district" json:"receiving_district,omitempty"`
+	Comments               string `bun:"comments" json:"comments,omitempty"`
+}
+
+type ExpressFeederFilterParams struct {
+	SendingRegions     []string
+	SendingDistricts   []string
+	ReceivingRegions   []string
+	ReceivingDistricts []string
+}
+
+type ExpressFeederMeterDetail struct {
+	MeterType      string  `json:"meter_type,omitempty"`
+	MultiplyFactor string  `json:"multiply_factor,omitempty"`
+	VoltageKv      string  `json:"voltage_kv,omitempty"`
+	ImportKwh      float64 `json:"import_kwh"`
+	ExportKwh      float64 `json:"export_kwh"`
+	NetKwh         float64 `json:"net_kwh"`
+}
+
+type ExpressFeederDailyResult struct {
+	ConsumptionDate        time.Time                 `json:"consumption_date"`
+	FeederName             string                    `json:"feeder_name"`
+	SapVersion             string                    `json:"sap_version"`
+	Comments               string                    `json:"comments,omitempty"`
+	SendingMeterNumber     string                    `json:"sending_meter_number,omitempty"`
+	SendingStation         string                    `json:"sending_station,omitempty"`
+	SendingTypeOfStation   string                    `json:"sending_type_of_station,omitempty"`
+	SendingCode            string                    `json:"sending_code,omitempty"`
+	SendingRegion          string                    `json:"sending_region,omitempty"`
+	SendingDistrict        string                    `json:"sending_district,omitempty"`
+	ReceivingMeterNumber   string                    `json:"receiving_meter_number,omitempty"`
+	ReceivingStation       string                    `json:"receiving_station,omitempty"`
+	ReceivingTypeOfStation string                    `json:"receiving_type_of_station,omitempty"`
+	ReceivingCode          string                    `json:"receiving_code,omitempty"`
+	ReceivingRegion        string                    `json:"receiving_region,omitempty"`
+	ReceivingDistrict      string                    `json:"receiving_district,omitempty"`
+	SendingMeter           *ExpressFeederMeterDetail `json:"sending_meter"`
+	ReceivingMeter         *ExpressFeederMeterDetail `json:"receiving_meter"`
+}
+
+type ExpressFeederMeterAgg struct {
+	ImportKwh float64 `json:"import_kwh"`
+	ExportKwh float64 `json:"export_kwh"`
+	NetKwh    float64 `json:"net_kwh"`
+}
+
+type ExpressFeederAggregatedConsumptionResult struct {
+	GroupPeriod            time.Time              `json:"group_period"`
+	FeederName             string                 `json:"feeder_name,omitempty"`
+	SapVersion             string                 `json:"sap_version,omitempty"`
+	MeterType              string                 `json:"meter_type,omitempty"`
+	SendingMeterNumber     string                 `json:"sending_meter_number,omitempty"`
+	SendingStation         string                 `json:"sending_station,omitempty"`
+	SendingTypeOfStation   string                 `json:"sending_type_of_station,omitempty"`
+	SendingCode            string                 `json:"sending_code,omitempty"`
+	SendingRegion          string                 `json:"sending_region,omitempty"`
+	SendingDistrict        string                 `json:"sending_district,omitempty"`
+	ReceivingMeterNumber   string                 `json:"receiving_meter_number,omitempty"`
+	ReceivingStation       string                 `json:"receiving_station,omitempty"`
+	ReceivingTypeOfStation string                 `json:"receiving_type_of_station,omitempty"`
+	ReceivingCode          string                 `json:"receiving_code,omitempty"`
+	ReceivingRegion        string                 `json:"receiving_region,omitempty"`
+	ReceivingDistrict      string                 `json:"receiving_district,omitempty"`
+	SendingMeter           *ExpressFeederMeterAgg `json:"sending_meter"`
+	ReceivingMeter         *ExpressFeederMeterAgg `json:"receiving_meter"`
+}

@@ -1324,6 +1324,453 @@ func (s *MeterService) GetFeederDailyConsumption(
 	return results, nil
 }
 
+// func (s *MeterService) GetExpressFeederDailyConsumption(
+// 	ctx context.Context,
+// 	params models.ReadingFilterParams,
+// ) ([]models.ExpressFeederDailyConsumptionResult, error) {
+// 	var results []models.ExpressFeederDailyConsumptionResult
+
+// 	filters := buildReadingFilters(params)
+
+// 	q := s.db.NewSelect().
+// 		ColumnExpr("mcd.consumption_date AT TIME ZONE 'UTC' AS consumption_date").
+// 		Column("mcd.meter_number").
+// 		Column("mtr.meter_type").
+// 		Column("mtr.multiply_factor").
+// 		Column("mtr.voltage_kv").
+// 		Column("mcd.day_start_reading").
+// 		Column("mcd.day_end_reading").
+// 		ColumnExpr("round((sum(mcd.consumption))::numeric, 4) AS consumed_energy").
+// 		Column("dim.system_name").
+// 		// Feeder fields
+// 		Column("f.feeder_name").
+// 		Column("f.sap_version").
+// 		Column("f.sending_station").
+// 		Column("f.sending_type_of_station").
+// 		Column("f.sending_code").
+// 		Column("f.sending_region").
+// 		Column("f.sending_district").
+// 		Column("f.receiving_station").
+// 		Column("f.receiving_type_of_station").
+// 		Column("f.receiving_code").
+// 		Column("f.receiving_region").
+// 		Column("f.receiving_district").
+// 		Column("f.comments").
+// 		TableExpr("app.meter_consumption_daily AS mcd").
+// 		Join("LEFT JOIN app.meters AS mtr ON mcd.meter_number = mtr.meter_number").
+// 		Join("JOIN app.data_item_mapping AS dim ON mcd.data_item_id = dim.data_item_id").
+// 		Join("LEFT JOIN app.express_feeders AS f ON mtr.id = f.sending_meter_id OR mtr.id = f.receiving_meter_id").
+// 		Where("mtr.meter_type = ?", "EXPRESS_FEEDER")
+
+// 	// Apply dynamic filters (except meter_type)
+// 	for _, f := range filters {
+// 		if strings.Contains(strings.ToLower(f.Query), "meter_type") {
+// 			continue
+// 		}
+// 		q = q.Where(f.Query, f.Args...)
+// 	}
+
+// 	q = q.
+// 		Group("mcd.consumption_date").
+// 		Group("mcd.meter_number").
+// 		Group("mtr.meter_type").
+// 		Group("mtr.multiply_factor").
+// 		Group("mtr.voltage_kv").
+// 		Group("dim.system_name").
+// 		Group("mcd.day_start_reading").
+// 		Group("mcd.day_end_reading").
+// 		Group("f.feeder_name").
+// 		Group("f.sap_version").
+// 		Group("f.sending_station").
+// 		Group("f.sending_type_of_station").
+// 		Group("f.sending_code").
+// 		Group("f.sending_region").
+// 		Group("f.sending_district").
+// 		Group("f.receiving_station").
+// 		Group("f.receiving_type_of_station").
+// 		Group("f.receiving_code").
+// 		Group("f.receiving_region").
+// 		Group("f.receiving_district").
+// 		Group("f.comments").
+// 		Order("mcd.consumption_date")
+
+// 	if err := q.Scan(ctx, &results); err != nil {
+// 		return nil, err
+// 	}
+
+// 	return results, nil
+// }
+
+type expressFeederRawRow struct {
+	ConsumptionDate        time.Time `bun:"consumption_date"`
+	MeterNumber            string    `bun:"meter_number"`
+	MeterType              string    `bun:"meter_type"`
+	MultiplyFactor         string    `bun:"multiply_factor"`
+	VoltageKv              string    `bun:"voltage_kv"`
+	SystemName             string    `bun:"system_name"`
+	ConsumedEnergy         float64   `bun:"consumed_energy"`
+	Station                string    `bun:"station"`
+	Region                 string    `bun:"region"`
+	District               string    `bun:"district"`
+	FeederName             string    `bun:"feeder_name"`
+	SapVersion             string    `bun:"sap_version"`
+	Comments               string    `bun:"comments"`
+	SendingMeterID         string    `bun:"sending_meter_id"`
+	ReceivingMeterID       string    `bun:"receiving_meter_id"`
+	MeterID                string    `bun:"meter_id"`
+	SendingStation         string    `bun:"sending_station"`
+	SendingTypeOfStation   string    `bun:"sending_type_of_station"`
+	SendingCode            string    `bun:"sending_code"`
+	SendingRegion          string    `bun:"sending_region"`
+	SendingDistrict        string    `bun:"sending_district"`
+	ReceivingStation       string    `bun:"receiving_station"`
+	ReceivingTypeOfStation string    `bun:"receiving_type_of_station"`
+	ReceivingCode          string    `bun:"receiving_code"`
+	ReceivingRegion        string    `bun:"receiving_region"`
+	ReceivingDistrict      string    `bun:"receiving_district"`
+}
+
+func (s *MeterService) GetExpressFeederDailyConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+) ([]models.ExpressFeederDailyResult, error) {
+
+	filters := buildReadingFilters(params)
+
+	type rawRow struct {
+		ConsumptionDate         time.Time `bun:"consumption_date"`
+		FeederName              string    `bun:"feeder_name"`
+		SapVersion              string    `bun:"sap_version"`
+		Comments                string    `bun:"comments"`
+		SendingMeterNumber      string    `bun:"sending_meter_number"`
+		SendingMeterType        string    `bun:"sending_meter_type"`
+		SendingMultiplyFactor   string    `bun:"sending_multiply_factor"`
+		SendingVoltageKv        string    `bun:"sending_voltage_kv"`
+		SendingStation          string    `bun:"sending_station"`
+		SendingTypeOfStation    string    `bun:"sending_type_of_station"`
+		SendingCode             string    `bun:"sending_code"`
+		SendingRegion           string    `bun:"sending_region"`
+		SendingDistrict         string    `bun:"sending_district"`
+		ReceivingMeterNumber    string    `bun:"receiving_meter_number"`
+		ReceivingMeterType      string    `bun:"receiving_meter_type"`
+		ReceivingMultiplyFactor string    `bun:"receiving_multiply_factor"`
+		ReceivingVoltageKv      string    `bun:"receiving_voltage_kv"`
+		ReceivingStation        string    `bun:"receiving_station"`
+		ReceivingTypeOfStation  string    `bun:"receiving_type_of_station"`
+		ReceivingCode           string    `bun:"receiving_code"`
+		ReceivingRegion         string    `bun:"receiving_region"`
+		ReceivingDistrict       string    `bun:"receiving_district"`
+		SendingSystemName       string    `bun:"sending_system_name"`
+		ReceivingSystemName     string    `bun:"receiving_system_name"`
+		SendingConsumption      float64   `bun:"sending_consumption"`
+		ReceivingConsumption    float64   `bun:"receiving_consumption"`
+	}
+
+	q := s.db.NewSelect().
+		TableExpr("app.express_feeders AS f").
+		Join("LEFT JOIN app.meters AS sm ON f.sending_meter_id = sm.id").
+		Join("LEFT JOIN app.meters AS rm ON f.receiving_meter_id = rm.id").
+		Join("LEFT JOIN app.meter_consumption_daily AS smcd ON smcd.meter_number = sm.meter_number AND smcd.consumption_date BETWEEN ? AND ?", params.DateFrom, params.DateTo).
+		Join("LEFT JOIN app.meter_consumption_daily AS rmcd ON rmcd.meter_number = rm.meter_number AND rmcd.consumption_date BETWEEN ? AND ?", params.DateFrom, params.DateTo).
+		Join("LEFT JOIN app.data_item_mapping AS sdim ON smcd.data_item_id = sdim.data_item_id").
+		Join("LEFT JOIN app.data_item_mapping AS rdim ON rmcd.data_item_id = rdim.data_item_id").
+		ColumnExpr("DATE(COALESCE(smcd.consumption_date, rmcd.consumption_date)) AS consumption_date").
+		ColumnExpr("f.feeder_name AS feeder_name").
+		ColumnExpr("f.sap_version AS sap_version").
+		ColumnExpr("f.comments AS comments").
+		ColumnExpr("sm.meter_number AS sending_meter_number").
+		ColumnExpr("sm.meter_type AS sending_meter_type").
+		ColumnExpr("sm.multiply_factor::text AS sending_multiply_factor").
+		ColumnExpr("sm.voltage_kv::text AS sending_voltage_kv").
+		ColumnExpr("f.sending_station AS sending_station").
+		ColumnExpr("f.sending_type_of_station AS sending_type_of_station").
+		ColumnExpr("f.sending_code AS sending_code").
+		ColumnExpr("f.sending_region AS sending_region").
+		ColumnExpr("f.sending_district AS sending_district").
+		ColumnExpr("rm.meter_number AS receiving_meter_number").
+		ColumnExpr("rm.meter_type AS receiving_meter_type").
+		ColumnExpr("rm.multiply_factor::text AS receiving_multiply_factor").
+		ColumnExpr("rm.voltage_kv::text AS receiving_voltage_kv").
+		ColumnExpr("f.receiving_station AS receiving_station").
+		ColumnExpr("f.receiving_type_of_station AS receiving_type_of_station").
+		ColumnExpr("f.receiving_code AS receiving_code").
+		ColumnExpr("f.receiving_region AS receiving_region").
+		ColumnExpr("f.receiving_district AS receiving_district").
+		ColumnExpr("sdim.system_name AS sending_system_name").
+		ColumnExpr("rdim.system_name AS receiving_system_name").
+		ColumnExpr("ROUND(SUM(smcd.consumption)::numeric, 4) AS sending_consumption").
+		ColumnExpr("ROUND(SUM(rmcd.consumption)::numeric, 4) AS receiving_consumption").
+		GroupExpr("DATE(COALESCE(smcd.consumption_date, rmcd.consumption_date))").
+		GroupExpr("f.feeder_name, f.sap_version, f.comments").
+		GroupExpr("sm.meter_number, sm.meter_type, sm.multiply_factor, sm.voltage_kv").
+		GroupExpr("rm.meter_number, rm.meter_type, rm.multiply_factor, rm.voltage_kv").
+		GroupExpr("f.sending_station, f.sending_type_of_station, f.sending_code, f.sending_region, f.sending_district").
+		GroupExpr("f.receiving_station, f.receiving_type_of_station, f.receiving_code, f.receiving_region, f.receiving_district").
+		GroupExpr("sdim.system_name, rdim.system_name").
+		OrderExpr("consumption_date, f.feeder_name")
+
+	for _, filter := range filters {
+		lq := strings.ToLower(filter.Query)
+		if strings.Contains(lq, "mcd.") {
+			continue
+		}
+		if strings.Contains(lq, "mtr.") {
+			continue
+		}
+		q = q.Where(filter.Query, filter.Args...)
+	}
+
+	var rows []rawRow
+	if err := q.Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+
+	type dailyKey struct {
+		ConsumptionDate string
+		FeederName      string
+		SapVersion      string
+	}
+
+	pivoted := map[dailyKey]*models.ExpressFeederDailyResult{}
+	var order []dailyKey
+
+	for _, row := range rows {
+		key := dailyKey{
+			ConsumptionDate: row.ConsumptionDate.Format("2006-01-02"),
+			FeederName:      row.FeederName,
+			SapVersion:      row.SapVersion,
+		}
+
+		if _, exists := pivoted[key]; !exists {
+			entry := &models.ExpressFeederDailyResult{
+				ConsumptionDate:        row.ConsumptionDate,
+				FeederName:             row.FeederName,
+				SapVersion:             row.SapVersion,
+				Comments:               row.Comments,
+				SendingMeterNumber:     row.SendingMeterNumber,
+				SendingStation:         row.SendingStation,
+				SendingTypeOfStation:   row.SendingTypeOfStation,
+				SendingCode:            row.SendingCode,
+				SendingRegion:          row.SendingRegion,
+				SendingDistrict:        row.SendingDistrict,
+				ReceivingMeterNumber:   row.ReceivingMeterNumber,
+				ReceivingStation:       row.ReceivingStation,
+				ReceivingTypeOfStation: row.ReceivingTypeOfStation,
+				ReceivingCode:          row.ReceivingCode,
+				ReceivingRegion:        row.ReceivingRegion,
+				ReceivingDistrict:      row.ReceivingDistrict,
+			}
+			if row.SendingMeterNumber != "" {
+				entry.SendingMeter = &models.ExpressFeederMeterDetail{
+					MeterType:      row.SendingMeterType,
+					MultiplyFactor: row.SendingMultiplyFactor,
+					VoltageKv:      row.SendingVoltageKv,
+				}
+			}
+			if row.ReceivingMeterNumber != "" {
+				entry.ReceivingMeter = &models.ExpressFeederMeterDetail{
+					MeterType:      row.ReceivingMeterType,
+					MultiplyFactor: row.ReceivingMultiplyFactor,
+					VoltageKv:      row.ReceivingVoltageKv,
+				}
+			}
+			pivoted[key] = entry
+			order = append(order, key)
+		}
+
+		entry := pivoted[key]
+
+		if entry.SendingMeter != nil {
+			switch row.SendingSystemName {
+			case "import_kwh":
+				entry.SendingMeter.ImportKwh += row.SendingConsumption
+			case "export_kwh":
+				entry.SendingMeter.ExportKwh += row.SendingConsumption
+			}
+			entry.SendingMeter.NetKwh = entry.SendingMeter.ImportKwh - entry.SendingMeter.ExportKwh
+		}
+
+		if entry.ReceivingMeter != nil {
+			switch row.ReceivingSystemName {
+			case "import_kwh":
+				entry.ReceivingMeter.ImportKwh += row.ReceivingConsumption
+			case "export_kwh":
+				entry.ReceivingMeter.ExportKwh += row.ReceivingConsumption
+			}
+			entry.ReceivingMeter.NetKwh = entry.ReceivingMeter.ImportKwh - entry.ReceivingMeter.ExportKwh
+		}
+	}
+
+	var results []models.ExpressFeederDailyResult
+	for _, key := range order {
+		results = append(results, *pivoted[key])
+	}
+
+	return results, nil
+}
+
+func (s *MeterService) GetExpressFeederAggregatedConsumption(
+	ctx context.Context,
+	params models.ReadingFilterParams,
+	groupBy string,
+	additionalGroups []string,
+) ([]models.ExpressFeederAggregatedConsumptionResult, error) {
+
+	filters := buildReadingFilters(params)
+
+	type rawRow struct {
+		GroupPeriod            time.Time `bun:"group_period"`
+		FeederName             string    `bun:"feeder_name"`
+		SapVersion             string    `bun:"sap_version"`
+		MeterType              string    `bun:"meter_type"`
+		SendingMeterNumber     string    `bun:"sending_meter_number"`
+		ReceivingMeterNumber   string    `bun:"receiving_meter_number"`
+		SendingStation         string    `bun:"sending_station"`
+		SendingTypeOfStation   string    `bun:"sending_type_of_station"`
+		SendingCode            string    `bun:"sending_code"`
+		SendingRegion          string    `bun:"sending_region"`
+		SendingDistrict        string    `bun:"sending_district"`
+		ReceivingStation       string    `bun:"receiving_station"`
+		ReceivingTypeOfStation string    `bun:"receiving_type_of_station"`
+		ReceivingCode          string    `bun:"receiving_code"`
+		ReceivingRegion        string    `bun:"receiving_region"`
+		ReceivingDistrict      string    `bun:"receiving_district"`
+		SendingSystemName      string    `bun:"sending_system_name"`
+		ReceivingSystemName    string    `bun:"receiving_system_name"`
+		SendingConsumption     float64   `bun:"sending_consumption"`
+		ReceivingConsumption   float64   `bun:"receiving_consumption"`
+	}
+
+	var periodExpr string
+	switch groupBy {
+	case "month":
+		periodExpr = "DATE_TRUNC('month', COALESCE(smcd.consumption_date, rmcd.consumption_date))"
+	case "year":
+		periodExpr = "DATE_TRUNC('year', COALESCE(smcd.consumption_date, rmcd.consumption_date))"
+	default:
+		periodExpr = "DATE(COALESCE(smcd.consumption_date, rmcd.consumption_date))"
+	}
+
+	q := s.db.NewSelect().
+		TableExpr("app.express_feeders AS f").
+		Join("LEFT JOIN app.meters AS sm ON f.sending_meter_id = sm.id").
+		Join("LEFT JOIN app.meters AS rm ON f.receiving_meter_id = rm.id").
+		Join("LEFT JOIN app.meter_consumption_daily AS smcd ON smcd.meter_number = sm.meter_number AND smcd.consumption_date BETWEEN ? AND ?", params.DateFrom, params.DateTo).
+		Join("LEFT JOIN app.meter_consumption_daily AS rmcd ON rmcd.meter_number = rm.meter_number AND rmcd.consumption_date BETWEEN ? AND ?", params.DateFrom, params.DateTo).
+		Join("LEFT JOIN app.data_item_mapping AS sdim ON smcd.data_item_id = sdim.data_item_id").
+		Join("LEFT JOIN app.data_item_mapping AS rdim ON rmcd.data_item_id = rdim.data_item_id").
+		ColumnExpr(periodExpr + " AS group_period").
+		ColumnExpr("f.feeder_name AS feeder_name").
+		ColumnExpr("f.sap_version AS sap_version").
+		ColumnExpr("COALESCE(sm.meter_type, rm.meter_type) AS meter_type").
+		ColumnExpr("sm.meter_number AS sending_meter_number").
+		ColumnExpr("rm.meter_number AS receiving_meter_number").
+		ColumnExpr("f.sending_station AS sending_station").
+		ColumnExpr("f.sending_type_of_station AS sending_type_of_station").
+		ColumnExpr("f.sending_code AS sending_code").
+		ColumnExpr("f.sending_region AS sending_region").
+		ColumnExpr("f.sending_district AS sending_district").
+		ColumnExpr("f.receiving_station AS receiving_station").
+		ColumnExpr("f.receiving_type_of_station AS receiving_type_of_station").
+		ColumnExpr("f.receiving_code AS receiving_code").
+		ColumnExpr("f.receiving_region AS receiving_region").
+		ColumnExpr("f.receiving_district AS receiving_district").
+		ColumnExpr("sdim.system_name AS sending_system_name").
+		ColumnExpr("rdim.system_name AS receiving_system_name").
+		ColumnExpr("ROUND(SUM(smcd.consumption)::numeric, 4) AS sending_consumption").
+		ColumnExpr("ROUND(SUM(rmcd.consumption)::numeric, 4) AS receiving_consumption").
+		GroupExpr(periodExpr).
+		GroupExpr("f.feeder_name, f.sap_version").
+		GroupExpr("sm.meter_number, rm.meter_number").
+		GroupExpr("sm.meter_type, rm.meter_type").
+		GroupExpr("f.sending_station, f.sending_type_of_station, f.sending_code, f.sending_region, f.sending_district").
+		GroupExpr("f.receiving_station, f.receiving_type_of_station, f.receiving_code, f.receiving_region, f.receiving_district").
+		GroupExpr("sdim.system_name, rdim.system_name").
+		OrderExpr("group_period, f.feeder_name")
+
+	for _, filter := range filters {
+		lq := strings.ToLower(filter.Query)
+		if strings.Contains(lq, "mcd.") {
+			continue
+		}
+		if strings.Contains(lq, "mtr.") {
+			continue
+		}
+		q = q.Where(filter.Query, filter.Args...)
+	}
+
+	var rows []rawRow
+	if err := q.Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+
+	type feederAggKey struct {
+		GroupPeriod string
+		FeederName  string
+		SapVersion  string
+	}
+
+	pivoted := map[feederAggKey]*models.ExpressFeederAggregatedConsumptionResult{}
+	var order []feederAggKey
+
+	for _, row := range rows {
+		key := feederAggKey{
+			GroupPeriod: row.GroupPeriod.Format("2006-01-02"),
+			FeederName:  row.FeederName,
+			SapVersion:  row.SapVersion,
+		}
+
+		if _, exists := pivoted[key]; !exists {
+			pivoted[key] = &models.ExpressFeederAggregatedConsumptionResult{
+				GroupPeriod:            row.GroupPeriod,
+				FeederName:             row.FeederName,
+				SapVersion:             row.SapVersion,
+				MeterType:              row.MeterType,
+				SendingMeterNumber:     row.SendingMeterNumber,
+				SendingStation:         row.SendingStation,
+				SendingTypeOfStation:   row.SendingTypeOfStation,
+				SendingCode:            row.SendingCode,
+				SendingRegion:          row.SendingRegion,
+				SendingDistrict:        row.SendingDistrict,
+				ReceivingMeterNumber:   row.ReceivingMeterNumber,
+				ReceivingStation:       row.ReceivingStation,
+				ReceivingTypeOfStation: row.ReceivingTypeOfStation,
+				ReceivingCode:          row.ReceivingCode,
+				ReceivingRegion:        row.ReceivingRegion,
+				ReceivingDistrict:      row.ReceivingDistrict,
+				SendingMeter:           &models.ExpressFeederMeterAgg{},
+				ReceivingMeter:         &models.ExpressFeederMeterAgg{},
+			}
+			order = append(order, key)
+		}
+
+		entry := pivoted[key]
+
+		switch row.SendingSystemName {
+		case "import_kwh":
+			entry.SendingMeter.ImportKwh += row.SendingConsumption
+		case "export_kwh":
+			entry.SendingMeter.ExportKwh += row.SendingConsumption
+		}
+		entry.SendingMeter.NetKwh = entry.SendingMeter.ImportKwh - entry.SendingMeter.ExportKwh
+
+		switch row.ReceivingSystemName {
+		case "import_kwh":
+			entry.ReceivingMeter.ImportKwh += row.ReceivingConsumption
+		case "export_kwh":
+			entry.ReceivingMeter.ExportKwh += row.ReceivingConsumption
+		}
+		entry.ReceivingMeter.NetKwh = entry.ReceivingMeter.ImportKwh - entry.ReceivingMeter.ExportKwh
+	}
+
+	var finalResults []models.ExpressFeederAggregatedConsumptionResult
+	for _, key := range order {
+		finalResults = append(finalResults, *pivoted[key])
+	}
+
+	return finalResults, nil
+}
+
 func (s *MeterService) GetPSSDailyConsumption(
 	ctx context.Context,
 	params models.ReadingFilterParams,
@@ -5229,7 +5676,7 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 		Args:  []interface{}{params.DateFrom, params.DateTo},
 	})
 
-	// Meter numbers (now slice)
+	// Meter numbers
 	if len(params.MeterNumber) > 0 {
 		filters = append(filters, Filter{
 			Query: "mcd.meter_number IN (?)",
@@ -5237,7 +5684,7 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 		})
 	}
 
-	// Region (lowercase)
+	// Region
 	if len(params.Regions) > 0 {
 		filters = append(filters, Filter{
 			Query: "lower(mtr.region) IN (?)",
@@ -5245,7 +5692,7 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 		})
 	}
 
-	// District (lowercase)
+	// District
 	if len(params.Districts) > 0 {
 		filters = append(filters, Filter{
 			Query: "lower(mtr.district) IN (?)",
@@ -5253,7 +5700,7 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 		})
 	}
 
-	// Station (lowercase)
+	// Station
 	if len(params.Stations) > 0 {
 		filters = append(filters, Filter{
 			Query: "lower(mtr.station) IN (?)",
@@ -5261,7 +5708,7 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 		})
 	}
 
-	// Location (lowercase)
+	// Location
 	if len(params.Locations) > 0 {
 		filters = append(filters, Filter{
 			Query: "lower(mtr.location) IN (?)",
@@ -5269,7 +5716,7 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 		})
 	}
 
-	// Boundary metering point (partial match - supports "Accra West" matching "Accra West/Tema")
+	// Boundary metering point (partial match)
 	if len(params.BoundaryMeteringPoint) > 0 {
 		conditions := make([]string, len(params.BoundaryMeteringPoint))
 		args := make([]interface{}, len(params.BoundaryMeteringPoint))
@@ -5283,7 +5730,7 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 		})
 	}
 
-	// Meter type (uppercase)
+	// Meter type
 	if len(params.MeterTypes) > 0 {
 		filters = append(filters, Filter{
 			Query: "mtr.meter_type IN (?)",
@@ -5291,11 +5738,40 @@ func buildReadingFilters(params models.ReadingFilterParams) []Filter {
 		})
 	}
 
-	// Voltage (numeric)
+	// Voltage
 	if len(params.Voltages) > 0 {
 		filters = append(filters, Filter{
 			Query: "mtr.voltage_kv IN (?)",
 			Args:  []interface{}{bun.In(params.Voltages)},
+		})
+	}
+
+	// --- Feeder secondary filters ---
+	if len(params.SendingRegions) > 0 {
+		filters = append(filters, Filter{
+			Query: "lower(f.sending_region) IN (?)",
+			Args:  []interface{}{bun.In(stringsToLower(params.SendingRegions))},
+		})
+	}
+
+	if len(params.SendingDistricts) > 0 {
+		filters = append(filters, Filter{
+			Query: "lower(f.sending_district) IN (?)",
+			Args:  []interface{}{bun.In(stringsToLower(params.SendingDistricts))},
+		})
+	}
+
+	if len(params.ReceivingRegions) > 0 {
+		filters = append(filters, Filter{
+			Query: "lower(f.receiving_region) IN (?)",
+			Args:  []interface{}{bun.In(stringsToLower(params.ReceivingRegions))},
+		})
+	}
+
+	if len(params.ReceivingDistricts) > 0 {
+		filters = append(filters, Filter{
+			Query: "lower(f.receiving_district) IN (?)",
+			Args:  []interface{}{bun.In(stringsToLower(params.ReceivingDistricts))},
 		})
 	}
 

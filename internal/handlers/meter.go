@@ -2414,6 +2414,93 @@ func (h *MeterHandler) GetRegionalMapConsumption(w http.ResponseWriter, r *http.
 	})
 }
 
+func (h *MeterHandler) GetExpressFeederDailyConsumption(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
+		return
+	}
+
+	params := models.ReadingFilterParams{
+		DateFrom:           dateFrom,
+		DateTo:             dateTo,
+		MeterNumber:        splitCSV(q.Get("meterNumber")),
+		Regions:            splitCSV(q.Get("region")),
+		Districts:          splitCSV(q.Get("district")),
+		Stations:           splitCSV(q.Get("station")),
+		Voltages:           splitCSV(q.Get("voltage_kv")),
+		SendingRegions:     splitCSV(q.Get("sendingRegion")),
+		SendingDistricts:   splitCSV(q.Get("sendingDistrict")),
+		ReceivingRegions:   splitCSV(q.Get("receivingRegion")),
+		ReceivingDistricts: splitCSV(q.Get("receivingDistrict")),
+	}
+
+	results, err := h.service.GetExpressFeederDailyConsumption(ctx, params)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, results)
+}
+
+func (h *MeterHandler) GetExpressFeederAggregatedConsumption(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
+
+	dateFrom, err := time.Parse(layout, q.Get("dateFrom"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateFrom")
+		return
+	}
+
+	dateTo, err := time.Parse(layout, q.Get("dateTo"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, "invalid dateTo")
+		return
+	}
+
+	groupBy := q.Get("groupBy")
+	if groupBy == "" {
+		groupBy = "day"
+	}
+
+	additionalGroups := splitCSV(q.Get("group"))
+
+	params := models.ReadingFilterParams{
+		DateFrom:           dateFrom,
+		DateTo:             dateTo,
+		MeterNumber:        splitCSV(q.Get("meterNumber")),
+		Regions:            splitCSV(q.Get("region")),
+		Districts:          splitCSV(q.Get("district")),
+		Stations:           splitCSV(q.Get("station")),
+		Voltages:           splitCSV(q.Get("voltage_kv")),
+		SendingRegions:     splitCSV(q.Get("sendingRegion")),
+		SendingDistricts:   splitCSV(q.Get("sendingDistrict")),
+		ReceivingRegions:   splitCSV(q.Get("receivingRegion")),
+		ReceivingDistricts: splitCSV(q.Get("receivingDistrict")),
+	}
+
+	results, err := h.service.GetExpressFeederAggregatedConsumption(ctx, params, groupBy, additionalGroups)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, results)
+}
+
 // GetDistrictGeometries handles GET /api/v1/meters/geometries/districts
 func (h *MeterHandler) GetDistrictGeometries(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -2781,7 +2868,6 @@ func (h *MeterHandler) GetRegionGeometries(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-
 // // Add these handlers to your MeterHandler struct in handlers/meter_handler.go
 
 // // GetRegionMetadata returns comprehensive metadata for a specific region
@@ -2873,7 +2959,6 @@ func (h *MeterHandler) GetRegionGeometries(w http.ResponseWriter, r *http.Reques
 // r.Get("/regions/{region}/metadata", meterHandler.GetRegionMetadata)
 // r.Get("/regions/{region}/districts/{district}/metadata", meterHandler.GetRegionDistrictMetadata)
 
-
 // --- helper functions ---
 
 func splitCSV(input string) []string {
@@ -2905,4 +2990,3 @@ func parseBool(input string) bool {
 	input = strings.ToLower(strings.TrimSpace(input))
 	return input == "1" || input == "true"
 }
-

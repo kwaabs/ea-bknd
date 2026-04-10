@@ -1509,14 +1509,28 @@ func (s *MeterService) GetExpressFeederDailyConsumption(
 		GroupExpr("sdim.system_name, rdim.system_name").
 		OrderExpr("consumption_date, f.feeder_name")
 
+	// ✅ NEW: Process filters – rewrite meter filters to apply to both sending and receiving meters
 	for _, filter := range filters {
 		lq := strings.ToLower(filter.Query)
-		if strings.Contains(lq, "mcd.") {
+
+		// Date filters are already enforced in JOIN conditions – skip them
+		if strings.Contains(lq, "consumption_date") {
 			continue
 		}
+
+		// Rewrite meter filters (mtr.*) to apply to both sending and receiving meters
 		if strings.Contains(lq, "mtr.") {
+			// Build left side (sending meter) and right side (receiving meter)
+			left := strings.ReplaceAll(filter.Query, "mtr.", "sm.")
+			right := strings.ReplaceAll(filter.Query, "mtr.", "rm.")
+			combined := fmt.Sprintf("(%s OR %s)", left, right)
+			// Duplicate arguments because both sides need them
+			bothArgs := append(filter.Args, filter.Args...)
+			q = q.Where(combined, bothArgs...)
 			continue
 		}
+
+		// Filters that target the express_feeders table (f.) are kept as‑is
 		q = q.Where(filter.Query, filter.Args...)
 	}
 
@@ -1688,14 +1702,26 @@ func (s *MeterService) GetExpressFeederAggregatedConsumption(
 		GroupExpr("sdim.system_name, rdim.system_name").
 		OrderExpr("group_period, f.feeder_name")
 
+	// ✅ NEW: Process filters – rewrite meter filters to apply to both sending and receiving meters
 	for _, filter := range filters {
 		lq := strings.ToLower(filter.Query)
-		if strings.Contains(lq, "mcd.") {
+
+		// Date filters are already enforced in JOIN conditions – skip them
+		if strings.Contains(lq, "consumption_date") {
 			continue
 		}
+
+		// Rewrite meter filters (mtr.*) to apply to both sending and receiving meters
 		if strings.Contains(lq, "mtr.") {
+			left := strings.ReplaceAll(filter.Query, "mtr.", "sm.")
+			right := strings.ReplaceAll(filter.Query, "mtr.", "rm.")
+			combined := fmt.Sprintf("(%s OR %s)", left, right)
+			bothArgs := append(filter.Args, filter.Args...)
+			q = q.Where(combined, bothArgs...)
 			continue
 		}
+
+		// Filters that target the express_feeders table (f.) are kept as‑is
 		q = q.Where(filter.Query, filter.Args...)
 	}
 

@@ -77,6 +77,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 			// Public routes
 			r.Post("/login", authHandler.LoginLocal)
 			r.Post("/ldap", authHandler.LoginLDAP)
+			r.Post("/azure", authHandler.LoginAzureAD) // 👈 add this
 
 			// Protected routes
 			r.Group(func(r chi.Router) {

@@ -26,6 +26,13 @@ type loginReq struct {
 	DeviceInfo string `json:"device_info"`
 }
 
+// 👇 add here
+type azureReq struct {
+    IDToken    string `json:"id_token"`
+    AccessToken string `json:"access_token"` // 👈 add this
+    DeviceInfo string `json:"device_info"`
+}
+
 type ldapReq struct {
 	Username   string `json:"username"`
 	Password   string `json:"password"`
@@ -200,4 +207,40 @@ func (h *AuthHandler) setRefreshCookie(w http.ResponseWriter, token string, expi
 		SameSite: http.SameSiteLaxMode,
 	}
 	http.SetCookie(w, cookie)
+}
+
+// POST /auth/azure
+func (h *AuthHandler) LoginAzureAD(w http.ResponseWriter, r *http.Request) {
+    var req azureReq
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "invalid payload", http.StatusBadRequest)
+        return
+    }
+    if req.AccessToken == "" { // 👈 changed from IDToken
+            http.Error(w, "access_token required", http.StatusBadRequest)
+            return
+    }
+
+    pair, user, err := h.authSvc.LoginAzureAD(r.Context(), req.IDToken, req.AccessToken, req.DeviceInfo) // 👈 pass both
+    if err != nil {
+        h.logr.Warn("azure login failed", zap.Error(err))
+        http.Error(w, "authentication failed", http.StatusUnauthorized)
+        return
+    }
+
+    h.setRefreshCookie(w, pair.RefreshToken, pair.RefreshExp)
+    resp := tokenResp{
+        AccessToken:  pair.AccessToken,
+        RefreshToken: pair.RefreshToken,
+        ExpiresAt:    pair.AccessExp,
+        User: &userInfo{
+            ID:       user.ID,
+            Email:    user.Email,
+            Name:     user.Name,
+            Provider: user.Provider,
+            Roles:    user.Roles,
+        },
+    }
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(resp)
 }

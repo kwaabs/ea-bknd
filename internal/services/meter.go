@@ -5634,6 +5634,178 @@ func (s *MeterService) GetDistrictTimeseriesConsumption(
 	}, nil
 }
 
+
+
+
+type CustomerSalesZeusService struct {
+	db *bun.DB
+}
+
+func NewCustomerSalesZeusService(db *bun.DB) *CustomerSalesZeusService {
+	return &CustomerSalesZeusService{db: db}
+}
+
+func (s *CustomerSalesZeusService) buildFilters(q *bun.SelectQuery, params models.CustomerSalesZeusFilterParams) *bun.SelectQuery {
+	if len(params.RegionName) > 0 {
+		q = q.Where("lower(regionname) IN (?)", bun.In(stringsToLower(params.RegionName)))
+	}
+	if len(params.DistrictName) > 0 {
+		q = q.Where("lower(districtname) IN (?)", bun.In(stringsToLower(params.DistrictName)))
+	}
+	if len(params.ServiceType) > 0 {
+		q = q.Where("lower(servicetype) IN (?)", bun.In(stringsToLower(params.ServiceType)))
+	}
+	if len(params.ServiceClass) > 0 {
+		q = q.Where("lower(serviceclass) IN (?)", bun.In(stringsToLower(params.ServiceClass)))
+	}
+	if len(params.TariffClassCode) > 0 {
+		q = q.Where("lower(tariffclasscode) IN (?)", bun.In(stringsToLower(params.TariffClassCode)))
+	}
+	if len(params.CustomerType) > 0 {
+		q = q.Where("lower(customertype) IN (?)", bun.In(stringsToLower(params.CustomerType)))
+	}
+	if len(params.AccountType) > 0 {
+		q = q.Where("lower(accounttype) IN (?)", bun.In(stringsToLower(params.AccountType)))
+	}
+	if len(params.ContractStatus) > 0 {
+		q = q.Where("lower(contractstatus) IN (?)", bun.In(stringsToLower(params.ContractStatus)))
+	}
+	if len(params.BillMonth) > 0 {
+		q = q.Where("lower(billmonth) IN (?)", bun.In(stringsToLower(params.BillMonth)))
+	}
+	if params.IsAMR != "" {
+		val := params.IsAMR == "true" || params.IsAMR == "t" || params.IsAMR == "1"
+		q = q.Where("isamr = ?", val)
+	}
+	if len(params.AccountNumber) > 0 {
+    	q = q.Where("accountnumber IN (?)", bun.In(params.AccountNumber))
+	}
+	if len(params.ServicePointNumber) > 0 {
+	    q = q.Where("servicepointnumber IN (?)", bun.In(params.ServicePointNumber))
+	}
+	if params.Search != "" {
+		search := "%" + strings.ToLower(strings.TrimSpace(params.Search)) + "%"
+		q = q.Where(
+			"(lower(fullname) LIKE ? OR lower(servicepointnumber::text) LIKE ? OR lower(accountnumber::text) LIKE ?)",
+			search, search, search,
+		)
+	}
+	if !params.LastBillDateFrom.IsZero() && !params.LastBillDateTo.IsZero() {
+	    q = q.Where("lastbilldate BETWEEN ? AND ?", params.LastBillDateFrom, params.LastBillDateTo)
+	}
+	if !params.LastReadingDateFrom.IsZero() && !params.LastReadingDateTo.IsZero() {
+	    q = q.Where("lastreadingdate BETWEEN ? AND ?", params.LastReadingDateFrom, params.LastReadingDateTo)
+	}
+	return q
+}
+
+func (s *CustomerSalesZeusService) GetDetail(
+	ctx context.Context,
+	params models.CustomerSalesZeusFilterParams,
+) (*models.CustomerSalesZeusDetailResult, error) {
+
+	if params.Page < 1 {
+		params.Page = 1
+	}
+	if params.Limit < 1 {
+		params.Limit = 50
+	}
+	if params.Limit > 500 {
+		params.Limit = 500 // prevent abuse
+	}
+
+	offset := (params.Page - 1) * params.Limit
+
+	var total int
+	countQ := s.db.NewSelect().TableExpr("app.customer_sales_zeus")
+	countQ = s.buildFilters(countQ, params)
+
+	if err := countQ.ColumnExpr("COUNT(*)").Scan(ctx, &total); err != nil {
+		return nil, err
+	}
+
+	var data []models.CustomerSalesZeus
+	dataQ := s.db.NewSelect().TableExpr("app.customer_sales_zeus")
+	dataQ = s.buildFilters(dataQ, params)
+
+	if err := dataQ.
+		ColumnExpr("*").
+		ColumnExpr("'Zeus' AS data_src").
+		OrderExpr("regionname, districtname, fullname, accountnumber"). // stable sort
+		Limit(params.Limit).
+		Offset(offset).
+		Scan(ctx, &data); err != nil {
+		return nil, err
+	}
+
+	totalPages := (total + params.Limit - 1) / params.Limit
+
+	return &models.CustomerSalesZeusDetailResult{
+		Data:       data,
+		Total:      total,
+		Page:       params.Page,
+		Limit:      params.Limit,
+		TotalPages: totalPages,
+	}, nil
+}
+
+func (s *CustomerSalesZeusService) GetAggregate(
+	ctx context.Context,
+	params models.CustomerSalesZeusFilterParams,
+	groupBy []string,
+) (*models.CustomerSalesZeusAggregateResult, error) {
+
+	validGroupBy := map[string]bool{
+		"regionname":      true,
+		"districtname":    true,
+		"contractstatus":  true,
+		"servicetype":     true,
+		"serviceclass":    true,
+		"tariffclasscode": true,
+		"customertype":    true,
+		"accounttype":     true,
+		"mda":             true,
+	}
+
+	q := s.db.NewSelect().TableExpr("app.customer_sales_zeus")
+	q = s.buildFilters(q, params)
+
+	q = q.
+		ColumnExpr("'Zeus' AS data_src").
+		ColumnExpr("COUNT(*) AS customer_count").
+		ColumnExpr("COALESCE(ROUND(SUM(lastbillamount)::numeric, 2), 0) AS sum_lastbillamount").
+		ColumnExpr("COALESCE(ROUND(SUM(lastbillconsumption)::numeric, 2), 0) AS sum_lastbillconsumption").
+		ColumnExpr("COALESCE(ROUND(SUM(currentbalance)::numeric, 2), 0) AS sum_currentbalance")
+
+	var validGroups []string
+	for _, g := range groupBy {
+		g = strings.ToLower(strings.TrimSpace(g))
+		if !validGroupBy[g] {
+			continue
+		}
+		validGroups = append(validGroups, g)
+		q = q.ColumnExpr(g).GroupExpr(g)
+	}
+
+	if len(validGroups) > 0 {
+		q = q.OrderExpr(strings.Join(validGroups, ", "))
+	}
+
+	var data []models.CustomerSalesZeusAggregateRow
+	if err := q.Scan(ctx, &data); err != nil {
+		return nil, err
+	}
+
+	return &models.CustomerSalesZeusAggregateResult{
+		Data:  data,
+		Total: len(data), // number of groups
+	}, nil
+}
+
+
+
+
+
 // Helper function to round coordinates
 func roundCoordinate(value float64, precision int) float64 {
 	multiplier := math.Pow(10, float64(precision))

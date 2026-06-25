@@ -30,6 +30,11 @@ type Config struct {
 
 	// CORS - Add this
 	AllowedOrigins []string
+
+	// Redis cache
+	RedisURL      string        // empty disables caching
+	CacheTTLShort time.Duration // volatile ranges (include today)
+	CacheTTLLong  time.Duration // immutable historical ranges
 }
 
 // Load loads environment variables and returns a Config struct
@@ -38,6 +43,9 @@ func Load() *Config {
 
 	accessTTLMin, _ := strconv.Atoi(getEnv("ACCESS_TOKEN_MINUTES", "15"))
 	refreshTTLDays, _ := strconv.Atoi(getEnv("REFRESH_TOKEN_DAYS", "10"))
+
+	cacheTTLShortSec, _ := strconv.Atoi(getEnv("CACHE_TTL_SHORT_SECONDS", "120"))   // 2m
+	cacheTTLLongSec, _ := strconv.Atoi(getEnv("CACHE_TTL_LONG_SECONDS", "21600")) // 6h
 
 	// Parse allowed origins from env (comma-separated)
 	allowedOrigins := strings.Split(
@@ -60,6 +68,10 @@ func Load() *Config {
 		LDAPBindPass:   getEnv("LDAP_BIND_PASS", ""),
 		LDAPBaseDN:     getEnv("LDAP_BASE_DN", ""),
 		AllowedOrigins: allowedOrigins, // Add this
+
+		RedisURL:      getEnv("REDIS_URL", ""),
+		CacheTTLShort: time.Duration(cacheTTLShortSec) * time.Second,
+		CacheTTLLong:  time.Duration(cacheTTLLongSec) * time.Second,
 	}
 }
 

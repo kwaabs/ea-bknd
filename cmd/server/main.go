@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bknd-1/internal/cache"
 	"bknd-1/internal/config"
 	"bknd-1/internal/database"
 	"bknd-1/internal/logger"
@@ -23,7 +24,28 @@ func main() {
 	}
 	defer db.Close()
 
-	r := routes.NewRouter(db, cfg, logr)
+	// Optional Redis cache. If REDIS_URL is unset (or Redis is unreachable) the
+	// app runs normally with caching disabled.
+	var c cache.Cache
+	if cfg.RedisURL != "" {
+		rc, cErr := cache.NewRedisCache(cfg.RedisURL)
+		if cErr != nil {
+			logr.Warn("failed to init redis cache, continuing without cache", zap.Error(cErr))
+		} else {
+			pingCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if pErr := rc.Ping(pingCtx); pErr != nil {
+				logr.Warn("redis ping failed, continuing without cache", zap.Error(pErr))
+				_ = rc.Close()
+			} else {
+				c = rc
+				defer rc.Close()
+				logr.Info("redis cache enabled")
+			}
+			cancel()
+		}
+	}
+
+	r := routes.NewRouter(db, cfg, logr, c)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,

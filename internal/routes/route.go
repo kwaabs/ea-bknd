@@ -2,6 +2,7 @@ package routes
 
 import (
 	"bknd-1/internal/auth"
+	"bknd-1/internal/cache"
 	"bknd-1/internal/config"
 	"bknd-1/internal/handlers"
 	"bknd-1/internal/logger"
@@ -19,8 +20,11 @@ import (
 	"github.com/go-chi/cors"
 )
 
-func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler {
+func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cache) http.Handler {
 	r := chi.NewRouter()
+
+	// Response cache for heavy, idempotent GET endpoints. No-op when c is nil.
+	cacheMW := cache.Middleware(c, cache.RecencyTTL(cfg.CacheTTLShort, cfg.CacheTTLLong), logr.Logger)
 
 	// Basic middleware
 	r.Use(middleware.RequestID)
@@ -28,10 +32,16 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 
 	// CORS middleware with config
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   cfg.AllowedOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link"},
+		AllowedOrigins: cfg.AllowedOrigins,
+		AllowedMethods: []string{
+			"GET", "POST", "PUT", "DELETE", "OPTIONS",
+		},
+		AllowedHeaders: []string{
+			"Accept", "Authorization", "Content-Type", "X-CSRF-Token",
+		},
+		ExposedHeaders: []string{
+			"Link",
+		},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -50,6 +60,9 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 	meterMetricsSvc := services.NewMeterMetricsService(db)
 	serviceAreaSvc := services.NewServiceAreaService(db) // ✅ NEW
 	commentSvc := services.NewCommentService(db, logr.Logger)
+	customerSalesZeusSvc := services.NewCustomerSalesZeusService(db)
+	mmsCustomerSalesSvc := services.NewMMSCustomerSalesService(db)
+	amrCustomerSvc := services.NewAmrCustomerService(db)
 
 	// create the auth middleware instance (pass dependencies)
 	authMW := mdlwr.NewAuthMiddleware(cfg.JWTPublicKeyPath, authSvc, logr.Logger)
@@ -62,6 +75,10 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 	feederHandler := handlers.NewFeederHandler(feederService, logr.Logger)
 
 	commentH := handlers.NewCommentHandler(commentSvc, logr.Logger)
+
+	customerSalesZeusHandler := handlers.NewCustomerSalesZeusHandler(customerSalesZeusSvc, logr.Logger)
+	mmsCustomerSalesHandler := handlers.NewMMSCustomerSalesHandler(mmsCustomerSalesSvc, logr.Logger)
+	amrCustomerHandler := handlers.NewAmrCustomerHandler(amrCustomerSvc, logr.Logger) // ✅ fix this line
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -121,7 +138,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 				r.Get("/details", meterHandler.GetMeterStatusDetails)   // 25 KB per page
 
 				// Keep existing for backward compatibility
-				r.Get("/", meterHandler.GetMeterStatus)             // DEPRECATED
+				r.Get("/", meterHandler.GetMeterStatus)          // DEPRECATED
 				r.Get("/counts", meterHandler.GetMeterStatusCounts) // DEPRECATED
 			})
 
@@ -135,19 +152,18 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 			// Keep existing readings routes unchanged
 			r.Route("/readings", func(r chi.Router) {
 				r.Get("/metrics", meterMetricsHandler.GetMeterMetrics)
-				r.Get("/aggregated", meterHandler.GetAggregatedReadings)
-				r.Get("/consumption", meterHandler.GetDailyConsumption)
+				r.With(cacheMW).Get("/aggregated", meterHandler.GetAggregatedReadings)
+				r.With(cacheMW).Get("/consumption", meterHandler.GetDailyConsumption)
 			})
 
-			// // Keep existing readings routes unchanged
-			// r.Route("/regions", func(r chi.Router) {
-			// 	r.Get("/metadata", meterHandler.GetAllRegionsMetadata)
-			// 	r.Get("/{region}/metadata", meterHandler.GetRegionMetadata)
-			// 	r.Get("/{region}/districts/{district}/metadata", meterHandler.GetRegionDistrictMetadata)
-			// })
+			// customer-sales-zeus routes are registered inside the cached
+			// /consumption group below (single source of truth).
 
 			// ✅ CONSUMPTION ENDPOINTS - ENHANCED
 			r.Route("/consumption", func(r chi.Router) {
+				// Cache all heavy consumption GETs (Redis-backed, gzip). No-op if disabled.
+				r.Use(cacheMW)
+
 				// NEW - Phase 2
 				r.Get("/by-region", meterHandler.GetConsumptionByRegion)       // Regional supply patterns
 				r.Get("/regional-map", meterHandler.GetRegionalMapConsumption) // Regional supply patterns
@@ -172,8 +188,13 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 				r.Get("/aggregate/dtx", meterHandler.GetDTXAggregatedConsumption)
 				r.Get("/top-bottom-consumers", meterHandler.GetTopBottomConsumers)
 				r.Get("/daily/express-feeder", meterHandler.GetExpressFeederDailyConsumption)
-
 				r.Get("/aggregate/express-feeder", meterHandler.GetExpressFeederAggregatedConsumption)
+
+				r.Get("/customer-sales-zeus/detail", customerSalesZeusHandler.GetDetail)
+				r.Get("/customer-sales-zeus/aggregate", customerSalesZeusHandler.GetAggregate)
+
+				r.Get("/mms-customer-sales/detail", mmsCustomerSalesHandler.GetDetail)
+				r.Get("/mms-customer-sales/aggregate", mmsCustomerSalesHandler.GetAggregate)
 			})
 
 			// ✅ NEW: Spatial service area routes
@@ -254,8 +275,36 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger) http.Handler
 			//r.Use(authMW.JWTAuth) // Protect with JWT if needed
 			r.Get("/", serviceAreaHandler.GetServiceAreas)            // Get all service areas
 			r.Get("/{id}", serviceAreaHandler.GetServiceAreaByID)     // Get single service area
-			r.Get("/meta/regions", serviceAreaHandler.GetRegions)     // Get unique regions
+			r.Get("/meta/regions", serviceAreaHandler.GetRegions)    // Get unique regions
 			r.Get("/meta/districts", serviceAreaHandler.GetDistricts) // Get unique districts
+		})
+
+		r.Route("/amr", func(r chi.Router) {
+			// Consumption
+			r.Get("/consumption/daily", amrCustomerHandler.GetDailyConsumption)
+			r.Get("/consumption/aggregate", amrCustomerHandler.GetAggregatedConsumption)
+
+			// Status
+			r.Get("/status", amrCustomerHandler.GetMeterStatus)
+			r.Get("/status/summary", amrCustomerHandler.GetMeterStatusSummary)
+			r.Get("/status/timeline", amrCustomerHandler.GetMeterStatusTimeline)
+			r.Get("/status/details", amrCustomerHandler.GetMeterStatusDetails)
+
+			// Health
+			r.Get("/health/summary", amrCustomerHandler.GetMeterHealthSummary)
+			r.Get("/health/details", amrCustomerHandler.GetMeterHealthDetails)
+
+			// Meter lookup
+			r.Get("/meters/{meterNumber}", amrCustomerHandler.GetMeterByNumber)
+
+			// Filter dropdowns
+			r.Get("/filters/regions", amrCustomerHandler.GetRegions)
+			r.Get("/filters/districts", amrCustomerHandler.GetDistricts)
+			r.Get("/filters/communities", amrCustomerHandler.GetCommunities)
+			r.Get("/filters/tariff-classes", amrCustomerHandler.GetTariffClasses)
+			r.Get("/filters/contract-statuses", amrCustomerHandler.GetContractStatuses)
+			r.Get("/filters/customer-types", amrCustomerHandler.GetCustomerTypes)
+			r.Get("/filters/service-types", amrCustomerHandler.GetServiceTypes)
 		})
 
 	})

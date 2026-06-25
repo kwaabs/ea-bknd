@@ -2868,96 +2868,177 @@ func (h *MeterHandler) GetRegionGeometries(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// // Add these handlers to your MeterHandler struct in handlers/meter_handler.go
 
-// // GetRegionMetadata returns comprehensive metadata for a specific region
-// // GET /api/v1/regions/{region}/metadata
-// func (h *MeterHandler) GetRegionMetadata(w http.ResponseWriter, r *http.Request) {
-// 	ctx := r.Context()
+type CustomerSalesZeusHandler struct {
+	service *services.CustomerSalesZeusService
+	logr    *zap.Logger
+}
 
-// 	// Get region from URL parameter
-// 	region := chi.URLParam(r, "region")
+func NewCustomerSalesZeusHandler(svc *services.CustomerSalesZeusService, logr *zap.Logger) *CustomerSalesZeusHandler {
+	return &CustomerSalesZeusHandler{service: svc, logr: logr}
+}
 
-// 	if region == "" {
-// 		writeJSON(w, http.StatusBadRequest, map[string]string{
-// 			"error": "region parameter is required",
-// 		})
-// 		return
-// 	}
+func (h *CustomerSalesZeusHandler) GetDetail(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
 
-// 	metadata, err := h.service.GetRegionMetadata(ctx, region)
-// 	if err != nil {
-// 		h.logr.Error("failed to get region metadata", zap.Error(err))
-// 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-// 			"error": "failed to retrieve region metadata",
-// 		})
-// 		return
-// 	}
+	page := 1
+	if p := q.Get("page"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			page = v
+		}
+	}
 
-// 	writeJSON(w, http.StatusOK, map[string]interface{}{
-// 		"success": true,
-// 		"data":    metadata,
-// 	})
-// }
+	limit := 50
+	if l := q.Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 500 {
+			limit = v
+		}
+	}
 
-// // GetAllRegionsMetadata returns metadata for all regions
-// // GET /api/v1/regions/metadata
-// func (h *MeterHandler) GetAllRegionsMetadata(w http.ResponseWriter, r *http.Request) {
-// 	ctx := r.Context()
+	var lastBillDateFrom, lastBillDateTo time.Time
+	var lastReadingDateFrom, lastReadingDateTo time.Time
 
-// 	metadata, err := h.service.GetAllRegionsMetadata(ctx)
-// 	if err != nil {
-// 		h.logr.Error("failed to get all regions metadata", zap.Error(err))
-// 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-// 			"error": "failed to retrieve regions metadata",
-// 		})
-// 		return
-// 	}
+	if v := q.Get("lastBillDateFrom"); v != "" {
+		t, err := time.Parse(layout, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, "invalid lastBillDateFrom")
+			return
+		}
+		lastBillDateFrom = t
+	}
+	if v := q.Get("lastBillDateTo"); v != "" {
+		t, err := time.Parse(layout, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, "invalid lastBillDateTo")
+			return
+		}
+		lastBillDateTo = t
+	}
+	if v := q.Get("lastReadingDateFrom"); v != "" {
+		t, err := time.Parse(layout, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, "invalid lastReadingDateFrom")
+			return
+		}
+		lastReadingDateFrom = t
+	}
+	if v := q.Get("lastReadingDateTo"); v != "" {
+		t, err := time.Parse(layout, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, "invalid lastReadingDateTo")
+			return
+		}
+		lastReadingDateTo = t
+	}
 
-// 	writeJSON(w, http.StatusOK, map[string]interface{}{
-// 		"success": true,
-// 		"data": map[string]interface{}{
-// 			"regions": metadata,
-// 			"total":   len(metadata),
-// 		},
-// 	})
-// }
+	params := models.CustomerSalesZeusFilterParams{
+		RegionName:          splitCSV(q.Get("region")),
+		DistrictName:        splitCSV(q.Get("district")),
+		ServiceType:         splitCSV(q.Get("serviceType")),
+		ServiceClass:        splitCSV(q.Get("serviceClass")),
+		TariffClassCode:     splitCSV(q.Get("tariffClassCode")),
+		CustomerType:        splitCSV(q.Get("customerType")),
+		AccountType:         splitCSV(q.Get("accountType")),
+		ContractStatus:      splitCSV(q.Get("contractStatus")),
+		BillMonth:           splitCSV(q.Get("billMonth")),
+		IsAMR:               q.Get("isAmr"),
+		Search:              q.Get("search"),
+		AccountNumber:      splitCSV(q.Get("accountNumber")),
+		ServicePointNumber: splitCSV(q.Get("servicePointNumber")),
+		LastBillDateFrom:    lastBillDateFrom,
+		LastBillDateTo:      lastBillDateTo,
+		LastReadingDateFrom: lastReadingDateFrom,
+		LastReadingDateTo:   lastReadingDateTo,
+		Page:                page,
+		Limit:               limit,
+	}
 
-// // GetRegionDistrictMetadata returns metadata for a specific district in a region
-// // GET /api/v1/regions/{region}/districts/{district}/metadata
-// func (h *MeterHandler) GetRegionDistrictMetadata(w http.ResponseWriter, r *http.Request) {
-// 	ctx := r.Context()
+	result, err := h.service.GetDetail(ctx, params)
+	if err != nil {
+		h.logr.Error("failed to get customer sales zeus detail", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
-// 	// Get URL parameters
-// 	region := chi.URLParam(r, "region")
-// 	district := chi.URLParam(r, "district")
+	writeJSON(w, http.StatusOK, result)
+}
 
-// 	if region == "" || district == "" {
-// 		writeJSON(w, http.StatusBadRequest, map[string]string{
-// 			"error": "both region and district parameters are required",
-// 		})
-// 		return
-// 	}
+func (h *CustomerSalesZeusHandler) GetAggregate(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	layout := "2006-01-02"
 
-// 	metadata, err := h.service.GetRegionDistrictMetadata(ctx, region, district)
-// 	if err != nil {
-// 		h.logr.Error("failed to get district metadata", zap.Error(err))
-// 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-// 			"error": "failed to retrieve district metadata",
-// 		})
-// 		return
-// 	}
+	var lastBillDateFrom, lastBillDateTo time.Time
+	var lastReadingDateFrom, lastReadingDateTo time.Time
 
-// 	writeJSON(w, http.StatusOK, map[string]interface{}{
-// 		"success": true,
-// 		"data":    metadata,
-// 	})
-// }
+	if v := q.Get("lastBillDateFrom"); v != "" {
+		t, err := time.Parse(layout, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, "invalid lastBillDateFrom")
+			return
+		}
+		lastBillDateFrom = t
+	}
+	if v := q.Get("lastBillDateTo"); v != "" {
+		t, err := time.Parse(layout, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, "invalid lastBillDateTo")
+			return
+		}
+		lastBillDateTo = t
+	}
+	if v := q.Get("lastReadingDateFrom"); v != "" {
+		t, err := time.Parse(layout, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, "invalid lastReadingDateFrom")
+			return
+		}
+		lastReadingDateFrom = t
+	}
+	if v := q.Get("lastReadingDateTo"); v != "" {
+		t, err := time.Parse(layout, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, "invalid lastReadingDateTo")
+			return
+		}
+		lastReadingDateTo = t
+	}
 
-// Example route registration in your router setup:
-// r.Get("/regions/metadata", meterHandler.GetAllRegionsMetadata)
-// r.Get("/regions/{region}/metadata", meterHandler.GetRegionMetadata)
-// r.Get("/regions/{region}/districts/{district}/metadata", meterHandler.GetRegionDistrictMetadata)
+	groupBy := splitCSV(q.Get("groupBy"))
+	if len(groupBy) == 0 {
+		groupBy = []string{"regionname"}
+	}
+
+	params := models.CustomerSalesZeusFilterParams{
+		RegionName:          splitCSV(q.Get("region")),
+		DistrictName:        splitCSV(q.Get("district")),
+		ServiceType:         splitCSV(q.Get("serviceType")),
+		ServiceClass:        splitCSV(q.Get("serviceClass")),
+		TariffClassCode:     splitCSV(q.Get("tariffClassCode")),
+		CustomerType:        splitCSV(q.Get("customerType")),
+		AccountType:         splitCSV(q.Get("accountType")),
+		ContractStatus:      splitCSV(q.Get("contractStatus")),
+		BillMonth:           splitCSV(q.Get("billMonth")),
+		IsAMR:               q.Get("isAmr"),
+		Search:              q.Get("search"),
+		LastBillDateFrom:    lastBillDateFrom,
+		LastBillDateTo:      lastBillDateTo,
+		LastReadingDateFrom: lastReadingDateFrom,
+		LastReadingDateTo:   lastReadingDateTo,
+	}
+
+	result, err := h.service.GetAggregate(ctx, params, groupBy)
+	if err != nil {
+		h.logr.Error("failed to get customer sales zeus aggregate", zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
 
 // --- helper functions ---
 
